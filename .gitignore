@@ -1,0 +1,55 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+.firebase
+*.local
+.env
+.env.local
+.env.*.local
+
+# Defensive safety net -- no file matching these currently exists in the
+# repo, but a real credential file must never be committed if one ever
+# appears here (e.g. a downloaded Firebase Admin SDK key or GCP key file).
+service-account*.json
+*firebase-adminsdk*.json
+*.pem
+*.key
+*.p12
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local Firebase emulator data
+emulator-data/
+emulator-data-saving/
+firebase-export-*/
+
+# Live-store tooling and data snapshots: contain live credentials and real
+# store/customer data -- never published.
+qa-screens/
+migration/
+_forensic-scan-out/
+_tmp_*
+*-debug.log
+.env.local
+local-test-accounts.txt
+
+# Local Claude Code settings
+.claude/

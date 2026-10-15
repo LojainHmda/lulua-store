@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("lulua-theme");
+          if (stored === "dark") document.documentElement.classList.add("dark");
+        } catch (e) {}
+        try {
+          var lang = localStorage.getItem("lulua-lang") || "en";
+          document.documentElement.lang = lang;
+          document.documentElement.dir = lang === "ar" ? "rtl" : "ltr";
+        } catch (e) {}
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#F6F3EE" />
+    <meta
+      name="description"
+      content="لؤلؤة — contemporary women's fashion. Dresses, tops, trousers and matching sets, designed for everyday wear."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:ital,wght@0,100..900;1,100..900&family=Inter:ital,wght@0,400..700;1,400..700&family=Cairo:wght@400..800&family=Tajawal:wght@400;500;700;800&family=Aref+Ruqaa:wght@400;700&family=Ms+Madi&display=swap"
+      rel="stylesheet"
+    />
+    <title>لؤلؤة — Contemporary women's fashion</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

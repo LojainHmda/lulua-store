@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="40 0 200 80" width="200" height="80">
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f3dfa2"/>
+      <stop offset="0.5" stop-color="#d4af5a"/>
+      <stop offset="1" stop-color="#a87f2e"/>
+    </linearGradient>
+  </defs>
+  <text x="140" y="56" text-anchor="middle" direction="rtl"
+        font-family="'Segoe UI', Tahoma, Arial, 'Noto Sans Arabic', sans-serif"
+        font-size="50" font-weight="700" fill="url(#gold)">لؤلؤة</text>
+</svg>

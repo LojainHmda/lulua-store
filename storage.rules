@@ -1,0 +1,22 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isActiveAdmin() {
+      return request.auth != null
+        && firestore.exists(/databases/(default)/documents/admins/$(request.auth.uid))
+        && firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.active == true;
+    }
+
+    // Uploaded media is served publicly (product photos, hero media, etc.)
+    // but only admins can upload, replace, or delete files.
+    match /media/{allPaths=**} {
+      allow read: if true;
+      allow write: if isActiveAdmin();
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

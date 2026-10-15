@@ -1,0 +1,86 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  annotations:
+    run.googleapis.com/build-enable-automatic-updates: 'false'
+    run.googleapis.com/build-id: 3faf8bab-b077-4c4c-9529-fcce2bb0a2a0
+    run.googleapis.com/build-image-uri: us-central1-docker.pkg.dev/sisely-e7223/cloud-run-source-deploy/sisely-united-proxy
+    run.googleapis.com/build-name: projects/870887053557/locations/us-central1/builds/3faf8bab-b077-4c4c-9529-fcce2bb0a2a0
+    run.googleapis.com/build-source-location: gs://run-sources-sisely-e7223-us-central1/services/sisely-united-proxy/1790788943.326927-46412c40d0e04c6da9b31f2cc24d60f7.zip#1790788943851684
+    run.googleapis.com/client-name: gcloud
+    run.googleapis.com/client-version: 575.0.1
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
+    run.googleapis.com/maxScale: '20'
+    run.googleapis.com/operation-id: 13fae5c8-7329-4dbd-bbd0-950f74b9f5e3
+    run.googleapis.com/urls: '["https://sisely-united-proxy-870887053557.us-central1.run.app","https://sisely-united-proxy-6supdxezla-uc.a.run.app"]'
+    serving.knative.dev/creator: admin@apps14.ai
+    serving.knative.dev/lastModifier: admin@apps14.ai
+  creationTimestamp: '2026-09-30T17:23:24.662604Z'
+  generation: 1
+  labels:
+    cloud.googleapis.com/location: us-central1
+  name: sisely-united-proxy
+  namespace: '870887053557'
+  resourceVersion: AAZcto+FMh8
+  selfLink: /apis/serving.knative.dev/v1/namespaces/870887053557/services/sisely-united-proxy
+  uid: 90f22586-5db7-44c2-bb8c-b1f72a68f9da
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: '5'
+        run.googleapis.com/client-name: gcloud
+        run.googleapis.com/client-version: 575.0.1
+        run.googleapis.com/startup-cpu-boost: 'true'
+      labels:
+        client.knative.dev/nonce: tnazaxnqnu
+        run.googleapis.com/startupProbeType: Default
+    spec:
+      containerConcurrency: 80
+      containers:
+      - env:
+        - name: GOOGLE_CLOUD_PROJECT
+          value: sisely-e7223
+        - name: UNITED_SECRET_NAME
+          value: united-credentials
+        image: us-central1-docker.pkg.dev/sisely-e7223/cloud-run-source-deploy/sisely-united-proxy@sha256:29c160dbf7f7b98664f9d75d7f427e901c622c53e6e2574f301e959c72255bf2
+        ports:
+        - containerPort: 8080
+          name: http1
+        resources:
+          limits:
+            cpu: '1'
+            memory: 256Mi
+        startupProbe:
+          failureThreshold: 1
+          periodSeconds: 240
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 240
+      serviceAccountName: sisely-united-proxy@sisely-e7223.iam.gserviceaccount.com
+      timeoutSeconds: 300
+  traffic:
+  - latestRevision: true
+    percent: 100
+status:
+  address:
+    url: https://sisely-united-proxy-6supdxezla-uc.a.run.app
+  conditions:
+  - lastTransitionTime: '2026-09-30T17:23:41.938207Z'
+    status: 'True'
+    type: Ready
+  - lastTransitionTime: '2026-09-30T17:23:31.437714Z'
+    status: 'True'
+    type: ConfigurationsReady
+  - lastTransitionTime: '2026-09-30T17:23:41.893306Z'
+    status: 'True'
+    type: RoutesReady
+  latestCreatedRevisionName: sisely-united-proxy-00001-qt4
+  latestReadyRevisionName: sisely-united-proxy-00001-qt4
+  observedGeneration: 1
+  traffic:
+  - latestRevision: true
+    percent: 100
+    revisionName: sisely-united-proxy-00001-qt4
+  url: https://sisely-united-proxy-6supdxezla-uc.a.run.app

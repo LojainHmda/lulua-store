@@ -1,0 +1,259 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+/* Short windows (laptops with a taskbar, landscape phones): tighten vertical
+   spacing so drawers/dialogs keep their actions on screen. */
+@custom-variant short (@media (max-height: 820px));
+
+@theme {
+  /* ---- Type ---- */
+  --font-display: "Archivo", "Inter", system-ui, sans-serif;
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display-ar: "Cairo", "Tajawal", system-ui, sans-serif;
+  --font-sans-ar: "Tajawal", "Cairo", system-ui, sans-serif;
+
+  /* ---- Neutrals (warm, editorial, not stark) ---- */
+  --color-cream: #f6f3ee;
+  --color-cream-dim: #efeae1;
+  --color-paper: #fffefc;
+  --color-ink: #1c1a17;
+  --color-ink-soft: #6f6a62;
+  --color-ink-faint: #a49d92;
+  --color-line: #e4ddd0;
+
+  /* ---- Wine (primary brand accent) ---- */
+  --color-wine: #6e1e36;
+  --color-wine-dark: #4f1526;
+  --color-wine-light: #f3e2e6;
+
+  /* Text/icon color for anything sitting on a solid --color-wine fill (the
+     site's "primary button" pattern). Deliberately its own token, not an
+     alias for --color-paper/--color-cream: those double as page-background
+     colors and flip to near-black in dark mode, while wine itself only
+     lightens (never becomes a light-enough surface for dark text). Aliasing
+     to paper/cream is what caused every primary button to render dark text
+     on a mid-tone background in dark mode — this token stays light in both
+     themes on purpose. */
+  --color-on-accent: #fffefc;
+
+  /* ---- Olive (secondary accent — used sparingly) ---- */
+  --color-olive: #5f6247;
+  --color-olive-light: #e7e6da;
+
+  /* ---- Sand / Stone (neutral surface variety, not saturated) ---- */
+  --color-sand: #e8ddc9;
+  --color-sand-dark: #cdbb98;
+  --color-stone: #d8d3c8;
+  --color-stone-dark: #a6a196;
+
+  --shadow-soft: 0 2px 10px rgba(28, 26, 23, 0.06);
+  --shadow-card: 0 10px 30px -14px rgba(28, 26, 23, 0.22);
+  --shadow-lift: 0 20px 45px -18px rgba(28, 26, 23, 0.3);
+
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --animate-fade-up: fade-up 0.5s var(--ease-out-quart);
+  --animate-pop: pop 0.3s var(--ease-out-quart);
+
+  @keyframes pop {
+    0% {
+      transform: scale(1);
+    }
+    45% {
+      transform: scale(1.15);
+    }
+    100% {
+      transform: scale(1);
+    }
+  }
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+/* ---- Dark theme — hand-tuned, not an inversion ---- */
+.dark {
+  --color-cream: #17140f;
+  --color-cream-dim: #201c16;
+  --color-paper: #241f18;
+  --color-ink: #f1ece1;
+  --color-ink-soft: #b6ac9c;
+  --color-ink-faint: #7c7365;
+  --color-line: #373126;
+
+  --color-wine: #a8425f;
+  --color-wine-dark: #c96385;
+  --color-wine-light: #33141e;
+  --color-on-accent: #fdf8f6;
+
+  --color-olive: #a2ab7d;
+  --color-olive-light: #23241a;
+
+  --color-sand: #2c2519;
+  --color-sand-dark: #453a26;
+  --color-stone: #2a2621;
+  --color-stone-dark: #4d473c;
+
+  --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --shadow-card: 0 10px 30px -14px rgba(0, 0, 0, 0.55);
+  --shadow-lift: 0 20px 45px -18px rgba(0, 0, 0, 0.65);
+
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    transition-property: background-color, border-color, color, fill, stroke, box-shadow;
+    transition-duration: 0.35s;
+    transition-timing-function: ease;
+  }
+
+  html {
+    scroll-behavior: auto;
+    font-size: 19px;
+    /* Matches body so the scrollbar gutter beside the header reads as part
+       of the cream top bar instead of a white/grey strip. */
+    background: var(--color-cream);
+  }
+
+  /* Storefront replaces the page's native scrollbar with an overlay one
+     (components/layout/PageScrollbar.tsx) that sits below the header and
+     only shows on hover; it adds this class while mounted. */
+  html.custom-scrollbar {
+    scrollbar-width: none;
+  }
+  html.custom-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-cream);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+
+  p {
+    margin: 0;
+  }
+
+  html[lang="ar"] body {
+    font-family: var(--font-sans-ar);
+  }
+
+  html[lang="ar"] h1,
+  html[lang="ar"] h2,
+  html[lang="ar"] h3,
+  html[lang="ar"] h4 {
+    font-family: var(--font-display-ar);
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  button {
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  img {
+    display: block;
+    max-width: 100%;
+  }
+
+  ::selection {
+    background: var(--color-wine);
+    color: var(--color-paper);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-wine);
+    outline-offset: 3px;
+  }
+}
+
+@layer utilities {
+  .container-page {
+    width: 100%;
+    max-width: 84rem;
+    margin-inline: auto;
+    padding-inline: 1.25rem;
+  }
+  @media (min-width: 768px) {
+    .container-page {
+      padding-inline: 2rem;
+    }
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Admin dashboard runs at a normal UI scale, independent of the
+     storefront's large editorial base font-size. */
+  .admin-root {
+    font-size: 16px;
+  }
+
+  .thin-scrollbar {
+    scrollbar-width: thin;
+  }
+  .thin-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .thin-scrollbar::-webkit-scrollbar-thumb {
+    background: var(--color-line);
+    border-radius: 999px;
+  }
+
+  /* Defense in depth: every numeric field in the app now goes through
+     NumberInput (src/components/ui/NumberInput.tsx), which renders
+     type="text" and so never shows these in the first place -- but this
+     keeps any future/overlooked type="number" input from silently
+     reintroducing the spinner UX this feature removed. */
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}

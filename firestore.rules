@@ -1,0 +1,1494 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // A "real" signed-in person — excludes anonymous guest sessions, used
+    // for the few actions a guest shouldn't get to do (editing a saved
+    // profile, leaving a review) even though guests can still check out.
+    function isIdentifiedUser() {
+      return isSignedIn() && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    function adminDoc() {
+      return get(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // isAnyAdmin()/isEditorOrAbove()/isCashierOrAbove()/isAdminOrAbove()/
+    // isOwner() each used to independently call adminDoc() (once for
+    // .data.active, again via a separate role() call for .data.role) —
+    // every one of these role checks cost 2 separate get()-on-the-same-path
+    // CEL evaluations. That doesn't waste Firestore's 20-get()/exists()
+    // transaction budget (repeated get()s on an identical path within one
+    // rule evaluation are deduplicated), but it DOES multiply the total CEL
+    // expression-node count, which has its own, separate hard cap (1000
+    // expressions per request). A real POS sale's transaction evaluates
+    // role checks across 4-5 different documents (checkoutClaims, each
+    // product, the order, the register session) in one commit — with the
+    // old double-call pattern, that routinely blew through the 1000-node
+    // budget and 403'd the whole sale (confirmed via the emulator's debug
+    // log). isActiveAdminWithRole() reads .data ONCE per call site instead.
+    function isActiveAdminWithRole(roles) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && adminDoc().data.active == true
+        && adminDoc().data.role in roles;
+    }
+
+    function isAnyAdmin() {
+      return isActiveAdminWithRole(['owner', 'admin', 'editor', 'viewer', 'cashier']);
+    }
+
+    function isEditorOrAbove() {
+      return isActiveAdminWithRole(['owner', 'admin', 'editor']);
+    }
+
+    function isCashierOrAbove() {
+      return isActiveAdminWithRole(['owner', 'admin', 'cashier']);
+    }
+
+    function isAdminOrAbove() {
+      return isActiveAdminWithRole(['owner', 'admin']);
+    }
+
+    // The exact 4 roles allowed to create/edit/clear a per-line Branch
+    // Stock Note (owner/admin/editor/cashier) -- every real working role
+    // except viewer (read-only catalog browsing has no legitimate reason to
+    // touch order data at all). Named around this specific feature, not a
+    // general hierarchy tier like the helpers above, because this exact
+    // 4-role set exists only for this one purpose -- see its two call
+    // sites below (orders/{id} read and the narrow update exception).
+    function isBranchNoteEditorOrAbove() {
+      return isActiveAdminWithRole(['owner', 'admin', 'editor', 'cashier']);
+    }
+
+    function isOwner() {
+      return isActiveAdminWithRole(['owner']);
+    }
+
+    // --- Multi-branch POS -------------------------------------------------
+    // A cashier may only act on the branches listed in their own
+    // admins/{uid}.branchIds; owner/admin are never branch-restricted.
+    // Reads adminDoc() (deduplicated with the role check's own get()) rather
+    // than calling a second role helper, to keep the POS sale commit inside
+    // the per-request expression budget (see isActiveAdminWithRole above).
+    function myBranchIds() {
+      return adminDoc().data.get('branchIds', []);
+    }
+
+    function canSellAtBranch(branchId) {
+      return isCashierOrAbove()
+        && (adminDoc().data.role != 'cashier' || branchId in myBranchIds());
+    }
+
+    function bootstrapClaimed() {
+      return exists(/databases/$(database)/documents/system/bootstrap);
+    }
+
+    // --- Checkout: no backend, so these rules are the only checkout guard -
+    // A checkout writes 3-4 documents in one transaction: a checkoutClaims/
+    // {uid} doc (validated against live product data — the one place price
+    // and existence get checked against the server-trusted product doc),
+    // one products/{id} update per distinct product (stock decrement,
+    // identity fields otherwise frozen), the orders/{id} create itself, and
+    // (identified customers only) a customers/{uid} stats increment. Each
+    // of those cross-checks the claim via getAfter() (the claim is written
+    // in the SAME transaction, so its pre-transaction state doesn't exist
+    // yet — get() would see "not found"). The claim is the one link tying
+    // an otherwise-independent product write to a real, price-checked
+    // checkout; without it, any signed-in (including anonymous-guest)
+    // session could vandalize stock with a bare products/{id} write.
+    //
+    // Firestore rules functions cannot recurse (a genuine hard limit, not
+    // just a depth cap — confirmed by the emulator's compiler rejecting a
+    // first, recursive draft of these rules outright) and there is no loop
+    // construct, so every "for each line/variant/size" check below is
+    // manually unrolled up to a fixed bound instead: MAX_LINES (8, shared
+    // with the get()-budget cap below), MAX_VARIANTS (6) and MAX_SIZES (8)
+    // per variant. Exceeding a bound fails the surrounding size() check and
+    // denies the write (fails closed), it doesn't silently skip cells.
+    //
+    // Capped at 8 lines: each product touched costs ~1 get()/getAfter(),
+    // the claim itself costs 1 get() per line, and order+customer cost 1
+    // getAfter() each — comfortably under the 20 get()/exists() budget for
+    // a multi-document transaction at 8, tight above it.
+    //
+    // Accepted, deliberate gap (documented, not an oversight): this proves
+    // "a decrement of exactly N units is backed by a claim of N units for
+    // this product," not that the decrement lands on the exact color/size
+    // the claim named, nor that an order or customer-stats write actually
+    // accompanies a given product/claim write, nor that imageId/imageUrl/
+    // gallery/colorNameAr survive untouched (only id/colorName/colorHex and
+    // the size labels are checked byte-for-byte — checking the rest too
+    // would mean unrolling several more optional-field comparisons per
+    // variant for comparatively little benefit). A determined signed-in
+    // user could decrement the "wrong" size within a product they're
+    // honestly checking out of, deface a variant's image while buying it,
+    // claim without following through on the order, or pad their own
+    // ordersCount without a matching order. None of that enables negative
+    // stock, cross-account tampering, price tampering, or privilege
+    // escalation — the worst case is a self-contained, admin-correctable
+    // inventory/CRM/display inaccuracy. Fully closing it would need a
+    // backend (Cloud Function), which conflicts with the no-backend
+    // decision for this project.
+    // isCashierOrAbove() checked FIRST (cheap: ~2 get()s) so it short-
+    // circuits before ever touching isValidClaim()'s per-line structural
+    // validation. A cashier/admin is already unconditionally trusted to
+    // rewrite any products/{id} doc and create any order elsewhere in this
+    // file, so this grants no new privilege — it just makes that same
+    // trust reachable. Ordering this the other way around (expensive check
+    // first) is what caused the real POS outage: isValidClaim()'s unrolled
+    // per-line/per-variant/per-size comparisons, combined with the rest of
+    // the same checkout transaction's rule evaluations (products update,
+    // order create), routinely exceeded Firestore's hard 1000-expression-
+    // per-request evaluation budget — confirmed via the emulator's debug
+    // log ("Unable to evaluate the expression as the maximum of 1000
+    // expressions to evaluate has been reached"), not a missing role check.
+    match /checkoutClaims/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if isSignedIn() && request.auth.uid == uid
+        && (isCashierOrAbove() || isValidClaim(request.resource.data));
+      allow delete: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isValidClaim(data) {
+      return data.lines is list
+        && data.lines.size() > 0
+        && data.lines.size() <= 8
+        && (0 >= data.lines.size() || claimLineValid(data.lines[0]))
+        && (1 >= data.lines.size() || claimLineValid(data.lines[1]))
+        && (2 >= data.lines.size() || claimLineValid(data.lines[2]))
+        && (3 >= data.lines.size() || claimLineValid(data.lines[3]))
+        && (4 >= data.lines.size() || claimLineValid(data.lines[4]))
+        && (5 >= data.lines.size() || claimLineValid(data.lines[5]))
+        && (6 >= data.lines.size() || claimLineValid(data.lines[6]))
+        && (7 >= data.lines.size() || claimLineValid(data.lines[7]));
+    }
+
+    // Mirrors src/admin/productVariants.ts's normalizeProduct(): most of the
+    // 27 originally-seeded products still predate the Phase 1 multi-variant
+    // model and have no colorVariants field at all, only top-level
+    // colorName/colorHex/imageId/stock. Rather than a one-time migration
+    // (which would need admin credentials this session doesn't have), the
+    // rules and the client both synthesize the identical single-variant
+    // shape at checkout time — the first purchase of a legacy product is
+    // what actually upgrades its stored shape to colorVariants.
+    function effectiveVariants(data) {
+      return data.get('colorVariants', []).size() > 0
+        ? data.colorVariants
+        : [{'id': 'default', 'colorName': data.get('colorName', ''), 'colorHex': data.get('colorHex', '#000000'),
+            'sizeStock': data.get('stock', [])}];
+    }
+
+    function claimLineValid(line) {
+      let product = get(/databases/$(database)/documents/products/$(line.productId)).data;
+      return line.qty is int
+        && line.qty > 0
+        && line.qty <= 20
+        && line.price == product.price
+        && product.status == 'active'
+        // colorvariants-map-migration-plan-2026-09-22: branch on the live
+        // product's actual colorVariants shape. Array-shaped products
+        // (pre-migration) use the ORIGINAL, byte-identical logic; FLATTENED
+        // map-shaped products (post-migration -- see the "FLATTENED STOCK
+        // SCHEMA" block below) use variantSizeExistsFlat(). Both shapes
+        // coexist safely during the migration window.
+        && (product.get('colorVariants', []) is list
+              ? variantSizeExists(effectiveVariants(product), line.variantId, line.size)
+              : variantSizeExistsFlat(product, line.variantId, line.size));
+    }
+
+    function variantSizeExists(variants, variantId, size) {
+      return (0 < variants.size() && variants[0].id == variantId && sizeInList(variants[0].sizeStock, size))
+        || (1 < variants.size() && variants[1].id == variantId && sizeInList(variants[1].sizeStock, size))
+        || (2 < variants.size() && variants[2].id == variantId && sizeInList(variants[2].sizeStock, size))
+        || (3 < variants.size() && variants[3].id == variantId && sizeInList(variants[3].sizeStock, size))
+        || (4 < variants.size() && variants[4].id == variantId && sizeInList(variants[4].sizeStock, size))
+        || (5 < variants.size() && variants[5].id == variantId && sizeInList(variants[5].sizeStock, size));
+    }
+
+    function sizeInList(sizeStock, size) {
+      return (0 < sizeStock.size() && sizeStock[0].size == size)
+        || (1 < sizeStock.size() && sizeStock[1].size == size)
+        || (2 < sizeStock.size() && sizeStock[2].size == size)
+        || (3 < sizeStock.size() && sizeStock[3].size == size)
+        || (4 < sizeStock.size() && sizeStock[4].size == size)
+        || (5 < sizeStock.size() && sizeStock[5].size == size);
+    }
+
+    // Structural validity (identity fields byte-for-byte unchanged, qty
+    // only ever decreases, never below zero) AND the before/after stock
+    // difference used to be two SEPARATE full traversals of the same
+    // variant/size matrix (a structural-only pass, then a totalStock(before)
+    // - totalStock(after) pass). Combined here into ONE pass per slot:
+    // each term evaluates to the slot's qty decrease (>= 0) when everything
+    // about that slot is structurally valid, or to a sentinel (-1000000)
+    // when it isn't. Real diffs across a whole product are always small
+    // (qty is capped at 20 per line, 8 lines per checkout — max possible
+    // legitimate sum is 160), so ANY structural violation anywhere makes
+    // the grand total wildly, unrecoverably negative and unable to equal a
+    // real claimedQty, without needing a separate boolean pass to catch it.
+    //
+    // This is not a cosmetic cleanup: with two separate O(variants x sizes)
+    // traversals, checking out a product with 3+ color variants exceeded
+    // Firestore's 1000-expression-per-request evaluation budget and 403'd
+    // the ENTIRE transaction (confirmed via the emulator's debug log) — for
+    // every buyer, guest, signed-in customer, or POS cashier alike, not
+    // just POS. Multi-variant checkout (most of the real Sisley catalog)
+    // was broken for everyone. Halving the traversal count was the fix.
+    function INVALID() { return -1000000; }
+
+    // Bound is 6, not the original 8: real catalog data (checked directly
+    // against production) shows all but a single outlier variant-instance
+    // (a shoe with 9 sizes) have <= 6 sizes; that one outlier already sits
+    // above even the original 8-size bound and needs its own inventory
+    // cleanup regardless (flagged separately, not a reason to keep every
+    // other product's checkout paying for a bound only one variant needs).
+    function sizeStockDiffOrInvalid(before, after) {
+      return before.size() != after.size() || before.size() > 6
+        ? INVALID()
+        : (0 < before.size() ? (before[0].size == after[0].size && after[0].qty <= before[0].qty && after[0].qty >= 0 ? before[0].qty - after[0].qty : INVALID()) : 0)
+          + (1 < before.size() ? (before[1].size == after[1].size && after[1].qty <= before[1].qty && after[1].qty >= 0 ? before[1].qty - after[1].qty : INVALID()) : 0)
+          + (2 < before.size() ? (before[2].size == after[2].size && after[2].qty <= before[2].qty && after[2].qty >= 0 ? before[2].qty - after[2].qty : INVALID()) : 0)
+          + (3 < before.size() ? (before[3].size == after[3].size && after[3].qty <= before[3].qty && after[3].qty >= 0 ? before[3].qty - after[3].qty : INVALID()) : 0)
+          + (4 < before.size() ? (before[4].size == after[4].size && after[4].qty <= before[4].qty && after[4].qty >= 0 ? before[4].qty - after[4].qty : INVALID()) : 0)
+          + (5 < before.size() ? (before[5].size == after[5].size && after[5].qty <= before[5].qty && after[5].qty >= 0 ? before[5].qty - after[5].qty : INVALID()) : 0);
+    }
+
+    function variantsDiffOrInvalid(before, after) {
+      return before.size() != after.size() || before.size() > 6
+        ? INVALID()
+        : (0 < before.size() ? (before[0].id == after[0].id && before[0].colorName == after[0].colorName && before[0].colorHex == after[0].colorHex ? sizeStockDiffOrInvalid(before[0].sizeStock, after[0].sizeStock) : INVALID()) : 0)
+          + (1 < before.size() ? (before[1].id == after[1].id && before[1].colorName == after[1].colorName && before[1].colorHex == after[1].colorHex ? sizeStockDiffOrInvalid(before[1].sizeStock, after[1].sizeStock) : INVALID()) : 0)
+          + (2 < before.size() ? (before[2].id == after[2].id && before[2].colorName == after[2].colorName && before[2].colorHex == after[2].colorHex ? sizeStockDiffOrInvalid(before[2].sizeStock, after[2].sizeStock) : INVALID()) : 0)
+          + (3 < before.size() ? (before[3].id == after[3].id && before[3].colorName == after[3].colorName && before[3].colorHex == after[3].colorHex ? sizeStockDiffOrInvalid(before[3].sizeStock, after[3].sizeStock) : INVALID()) : 0)
+          + (4 < before.size() ? (before[4].id == after[4].id && before[4].colorName == after[4].colorName && before[4].colorHex == after[4].colorHex ? sizeStockDiffOrInvalid(before[4].sizeStock, after[4].sizeStock) : INVALID()) : 0)
+          + (5 < before.size() ? (before[5].id == after[5].id && before[5].colorName == after[5].colorName && before[5].colorHex == after[5].colorHex ? sizeStockDiffOrInvalid(before[5].sizeStock, after[5].sizeStock) : INVALID()) : 0);
+    }
+
+    function claimedQtyForProduct(lines, productId) {
+      return ((0 < lines.size() && lines[0].productId == productId) ? lines[0].qty : 0)
+        + ((1 < lines.size() && lines[1].productId == productId) ? lines[1].qty : 0)
+        + ((2 < lines.size() && lines[2].productId == productId) ? lines[2].qty : 0)
+        + ((3 < lines.size() && lines[3].productId == productId) ? lines[3].qty : 0)
+        + ((4 < lines.size() && lines[4].productId == productId) ? lines[4].qty : 0)
+        + ((5 < lines.size() && lines[5].productId == productId) ? lines[5].qty : 0)
+        + ((6 < lines.size() && lines[6].productId == productId) ? lines[6].qty : 0)
+        + ((7 < lines.size() && lines[7].productId == productId) ? lines[7].qty : 0);
+    }
+
+    // Cheap structural checks first, expensive getAfter() last, so a write
+    // that isn't shaped like a checkout decrement fails before spending
+    // any of the transaction's get() budget.
+    //
+    // colorvariants-map-migration-plan-2026-09-22: branches on which FIELD
+    // the write actually touches. A write touching `colorVariants` (array)
+    // uses the ORIGINAL, byte-identical logic below -- pre-migration
+    // products are completely unaffected. A write touching `stockByCell`
+    // (the FLATTENED schema -- see "FLATTENED STOCK SCHEMA" below) uses the
+    // new, budget-safe logic. `||` short-circuits, so only the matching
+    // branch is ever evaluated -- no double cost for either shape. See
+    // migration/colorvariants-map-migration-plan-2026-09-22/spike2/
+    // SPIKE-REPORT-2.md for the full feasibility proof (11 required test
+    // cases + the complete security/tampering suite, all passing, including
+    // the real worst-case 18-color/40-slot product with a full 8-line
+    // multi-color claim).
+    function isValidStockDecrement(id) {
+      return isSignedIn()
+        && ((request.resource.data.diff(resource.data).affectedKeys().hasOnly(['colorVariants', 'updatedAt'])
+              && request.resource.data.colorVariants is list
+              && stockDecreaseMatchesClaim(id))
+            || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stockByCell', 'updatedAt'])
+              && request.resource.data.stockByCell is map
+              && stockDecreaseMatchesClaimFlat(id)));
+    }
+
+    function stockDecreaseMatchesClaim(id) {
+      let claimedQty = claimedQtyForProduct(
+        getAfter(/databases/$(database)/documents/checkoutClaims/$(request.auth.uid)).data.lines, id);
+      return claimedQty > 0
+        && variantsDiffOrInvalid(effectiveVariants(resource.data), request.resource.data.colorVariants) == claimedQty;
+    }
+
+    // ========================================================================
+    // FLATTENED STOCK SCHEMA (colorvariants-map-migration-plan-2026-09-22).
+    // Approved, spike-2-proven design. Product documents using this schema
+    // store colorVariants as a MAP of variantId -> METADATA ONLY (colorName,
+    // colorNameAr, colorHex, imageId, imageUrl, gallery, order -- no
+    // sizeStock nested inside, so it is frozen during every checkout write
+    // by construction: it is simply never in the allow-list below). All
+    // stock lives in a SEPARATE, FLAT, top-level `stockByCell` map, keyed by
+    // the composite string "<variantId>::<size>". This removes the need for
+    // a nested .diff() call per touched color (the root cause of the
+    // catalog-size AND multi-color-per-checkout expression-budget cliffs
+    // found during this migration's two feasibility spikes): exactly ONE
+    // top-level .diff() on stockByCell validates every claimed cell, no
+    // matter how many distinct colors/sizes one checkout claims, up to the
+    // existing, UNCHANGED 8-line cap on checkoutClaims (isValidClaim above).
+    // ========================================================================
+
+    function cellKey(line) { return line.variantId + '::' + line.size; }
+
+    // Map-shaped equivalent of effectiveVariants()'s legacy-doc fallback.
+    // Confirmed via direct live-data query (plan.md section 8) that zero
+    // such documents exist in the current catalog -- defensive-only.
+    function effectiveStockByCellFlat(data) {
+      return data.get('stockByCell', {}).size() > 0 ? data.stockByCell : {};
+    }
+
+    function variantSizeExistsFlat(product, variantId, size) {
+      return (variantId in product.get('colorVariants', {}))
+        && ((variantId + '::' + size) in effectiveStockByCellFlat(product));
+    }
+
+    // Builds the list of composite cell-keys "allowed to change" for this
+    // product, unrolled over the fixed MAX_LINES=8 checkoutClaims bound
+    // (shared with claimedQtyForProduct above) -- NOT over the product's
+    // own variant/size count. A fixed-length, ternary-per-element list
+    // literal (a '__none__' placeholder for an absent/non-matching slot):
+    // list CONCATENATION ('+') is UNSUPPORTED by Firestore Rules CEL
+    // ("Unsupported operation error: list + list" -- confirmed empirically,
+    // see spike/phase0-probe.mjs); this fixed-length form is proven correct
+    // with hasOnly()'s subset check, including with placeholder padding.
+    function touchedCellKeysForProduct(lines, productId) {
+      return [
+        (0 < lines.size() && lines[0].productId == productId) ? cellKey(lines[0]) : '__none__',
+        (1 < lines.size() && lines[1].productId == productId) ? cellKey(lines[1]) : '__none__',
+        (2 < lines.size() && lines[2].productId == productId) ? cellKey(lines[2]) : '__none__',
+        (3 < lines.size() && lines[3].productId == productId) ? cellKey(lines[3]) : '__none__',
+        (4 < lines.size() && lines[4].productId == productId) ? cellKey(lines[4]) : '__none__',
+        (5 < lines.size() && lines[5].productId == productId) ? cellKey(lines[5]) : '__none__',
+        (6 < lines.size() && lines[6].productId == productId) ? cellKey(lines[6]) : '__none__',
+        (7 < lines.size() && lines[7].productId == productId) ? cellKey(lines[7]) : '__none__'
+      ];
+    }
+
+    // One cell's valid-decrement amount, or INVALID() -- takes the
+    // ALREADY-COMPUTED key directly. The '__none__' sentinel
+    // touchedCellKeysForProduct() already produces for an absent/
+    // non-matching slot IS the "this slot doesn't apply" guard -- no second
+    // bounds/productId re-check and no second cellKey() string-
+    // concatenation. This reuse (computing the keys list exactly once and
+    // reusing its elements for both the top-level hasOnly() and every
+    // per-cell check) is what makes all 8 checkout lines safe against one
+    // product at once -- see SPIKE-REPORT-2.md section 3 for the measured
+    // progression (a naive per-line-recompute version only supported 4).
+    function cellDeltaForKeyOrInvalid(before, after, key) {
+      return key == '__none__'
+        ? 0
+        : (key in before && key in after
+            && after[key].qty <= before[key].qty && after[key].qty >= 0
+          ) ? before[key].qty - after[key].qty
+            : INVALID();
+    }
+
+    function stockDecreaseMatchesClaimFlat(id) {
+      let lines = getAfter(/databases/$(database)/documents/checkoutClaims/$(request.auth.uid)).data.lines;
+      let before = effectiveStockByCellFlat(resource.data);
+      let after = request.resource.data.stockByCell;
+      let claimedQty = claimedQtyForProduct(lines, id);
+      let keys = touchedCellKeysForProduct(lines, id);
+      return claimedQty > 0
+        && after.diff(before).affectedKeys().hasOnly(keys)
+        && (cellDeltaForKeyOrInvalid(before, after, keys[0]) + cellDeltaForKeyOrInvalid(before, after, keys[1])
+          + cellDeltaForKeyOrInvalid(before, after, keys[2]) + cellDeltaForKeyOrInvalid(before, after, keys[3])
+          + cellDeltaForKeyOrInvalid(before, after, keys[4]) + cellDeltaForKeyOrInvalid(before, after, keys[5])
+          + cellDeltaForKeyOrInvalid(before, after, keys[6]) + cellDeltaForKeyOrInvalid(before, after, keys[7])) == claimedQty;
+    }
+    // ==================== END FLATTENED STOCK SCHEMA =======================
+
+    function claimSubtotal(lines) {
+      return (0 < lines.size() ? lines[0].price * lines[0].qty : 0)
+        + (1 < lines.size() ? lines[1].price * lines[1].qty : 0)
+        + (2 < lines.size() ? lines[2].price * lines[2].qty : 0)
+        + (3 < lines.size() ? lines[3].price * lines[3].qty : 0)
+        + (4 < lines.size() ? lines[4].price * lines[4].qty : 0)
+        + (5 < lines.size() ? lines[5].price * lines[5].qty : 0)
+        + (6 < lines.size() ? lines[6].price * lines[6].qty : 0)
+        + (7 < lines.size() ? lines[7].price * lines[7].qty : 0);
+    }
+
+    function lineMatchesClaim(orderLine, claimLine) {
+      return orderLine.productId == claimLine.productId
+        && orderLine.variantId == claimLine.variantId
+        && orderLine.size == claimLine.size
+        && orderLine.qty == claimLine.qty
+        && orderLine.price == claimLine.price;
+    }
+
+    function orderLinesMatchClaim(orderLines, claimLines) {
+      return orderLines.size() == claimLines.size()
+        && (0 >= orderLines.size() || lineMatchesClaim(orderLines[0], claimLines[0]))
+        && (1 >= orderLines.size() || lineMatchesClaim(orderLines[1], claimLines[1]))
+        && (2 >= orderLines.size() || lineMatchesClaim(orderLines[2], claimLines[2]))
+        && (3 >= orderLines.size() || lineMatchesClaim(orderLines[3], claimLines[3]))
+        && (4 >= orderLines.size() || lineMatchesClaim(orderLines[4], claimLines[4]))
+        && (5 >= orderLines.size() || lineMatchesClaim(orderLines[5], claimLines[5]))
+        && (6 >= orderLines.size() || lineMatchesClaim(orderLines[6], claimLines[6]))
+        && (7 >= orderLines.size() || lineMatchesClaim(orderLines[7], claimLines[7]));
+    }
+
+    // Structural proof that a policyConsent record of the right shape rode
+    // along with this order create — see AdminOrder.policyConsent (src/
+    // admin/types.ts) and the exchange-policy checkout step (src/components/
+    // checkout/ExchangePolicyModal.tsx). Deliberately NOT cross-checked
+    // against the live settings/exchangePolicy doc's current version: doing
+    // that would cost this transaction an extra get(), and this function is
+    // already evaluated on every web checkout alongside stockDecreaseMatches
+    // Claim()'s own get()s — see the MAX_CHECKOUT_LINES/get()-budget history
+    // documented above isValidStockDecrement(). A customer who crafts their
+    // own fake version number only misrepresents their OWN order's audit
+    // trail, the same accepted, self-contained gap already documented for
+    // claim-line color/image fields near isValidClaim() — never a cross-
+    // account, negative-stock, or price-tampering risk. The real UI always
+    // sends the real current version (see Checkout.tsx).
+    function isValidPolicyConsent(consent) {
+      return consent.policyVersion is int
+        && consent.lang in ['en', 'ar'];
+    }
+
+    // Audit finding A1: `discount` and `shipping` used to be range-checked
+    // only (0 <= discount <= subtotal, 0 <= shipping <= 100) — never tied to
+    // anything real, unlike `subtotal`/`lines` (see checkoutOrderMatchesClaim
+    // below). That let any signed-in principal, including an anonymous
+    // guest, submit discount == subtotal with no real code at all: a free
+    // real order with real stock decremented. These two functions close
+    // that the same way price is already closed for line items — an
+    // independent live read, not a client-trusted number.
+    //
+    // Deliberately evaluated directly against the order write via plain
+    // get() (not routed through checkoutClaims/getAfter()): neither
+    // discounts/{id} nor settings/shipping is written by this transaction,
+    // so no getAfter() is needed, and — critically — this avoids adding any
+    // cost to isValidClaim()/stockDecreaseMatchesClaim()'s already-tight,
+    // per-line-multiplied get() budget (see the MAX_CHECKOUT_LINES history
+    // above isValidStockDecrement()). Each of these two functions costs
+    // exactly one flat get(), regardless of cart size, and the discount one
+    // is skipped entirely when no code was applied — empirically verified
+    // (qa-screens/investigate-a1-discount-shipping-budget.mjs) to still
+    // clear the budget at the worst case: 8 lines, 8 distinct products, an
+    // identified customer, AND a discount code, all at once.
+    //
+    // Only ever reached via isValidCheckoutOrder() below, i.e. only for a
+    // customer's own web checkout. POS's manual, cashier-applied discount
+    // (Terminal.tsx) goes through the separate isCashierOrAbove() branch on
+    // orders/{id} create and is untouched — that path is already trusted by
+    // design (a cashier can already write any order shape), not part of
+    // this vulnerability, and was never routed through a discount code.
+    function isValidDiscountForOrder(discountId, amount, subtotal) {
+      let d = get(/databases/$(database)/documents/discounts/$(discountId)).data;
+      // (subtotal * d.value) / 100, NOT subtotal * (d.value / 100) — CEL
+      // rejects mixing int and double mid-expression with a hard evaluation
+      // error (not just a wrong result), and d.value / 100 alone produces a
+      // double while subtotal stays int; multiplying those two directly
+      // throws "no matching overload". Multiplying the two ints first, then
+      // dividing last, never creates that mixed-type intermediate.
+      // Empirically confirmed via qa-screens/investigate-a1-isolated.mjs.
+      let maxAmount = d.type == 'percent' ? (subtotal * d.value) / 100 : d.value;
+      return d.active == true
+        && amount is number
+        && amount >= 0
+        && amount <= subtotal
+        && amount <= maxAmount
+        && (d.get('minSubtotal', null) == null || subtotal >= d.minSubtotal)
+        && (d.get('usageLimit', null) == null || d.get('usageCount', 0) < d.usageLimit);
+      // Deliberately not checked here: `expiresAt` (stored as a plain
+      // "YYYY-MM-DD" string — see AdminDiscount — with no practical way to
+      // parse/compare it against request.time in rules without either a
+      // data-model change or a fragile hand-rolled parser) and the
+      // usageCount-increment race already documented on discounts/{id}'s
+      // own update rule above. Both are pre-existing, narrow, admin-
+      // correctable inaccuracies (an expired-but-still-active code stays
+      // usable a little longer than it should; a code could be used a few
+      // times past its limit under a race) — never a way to fabricate an
+      // unbounded or unbacked discount the way the amount/active/subtotal
+      // checks above close off.
+    }
+
+    // Delivery fee is now determined by the customer's selected city/region
+    // (deliveryZones/{id}), replacing the old Standard/Express method
+    // system. Mirrors resolveDeliveryFee()'s exact behavior (src/data/
+    // deliveryZones.ts): free-shipping threshold met -> 0 regardless of
+    // zone; below it, the charged amount must equal that EXACT zone's
+    // current fee, and the zone must actually exist and be active. A
+    // missing/inactive zone or a mismatched fee both fail closed -- there is
+    // deliberately no fallback rate a client could steer toward instead.
+    function isValidShippingForOrder(subtotal, shipping, zoneId) {
+      // A fresh project (or a test environment — every existing checkout
+      // test in tests/rules/checkout.test.ts included) may not have
+      // settings/shipping at all yet; get().data on a nonexistent doc is a
+      // hard evaluation error in rules, not just an empty map, so this must
+      // be guarded — falls back to the same default SHIPPING_DEFAULTS uses
+      // client-side (src/data/deliveryZones.ts).
+      let settingsPath = /databases/$(database)/documents/settings/shipping;
+      let freeThreshold = exists(settingsPath) ? get(settingsPath).data.get('freeShippingThreshold', 500) : 500;
+      let zonePath = /databases/$(database)/documents/deliveryZones/$(zoneId);
+      let zoneExists = exists(zonePath);
+      let zone = zoneExists ? get(zonePath).data : {};
+      return subtotal >= freeThreshold
+        ? shipping == 0
+        : zoneExists
+          && zone.get('active', false) == true
+          && shipping is number
+          && shipping == zone.get('fee', -1);
+    }
+
+    // Cheap checks first, getAfter() last, same reasoning as above.
+    function isValidCheckoutOrder() {
+      return isSignedIn()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.keys().hasOnly(['orderNumber', 'customerId', 'customerName', 'customerEmail',
+             'customerPhone', 'lines', 'subtotal', 'discount', 'discountId', 'shipping', 'total', 'status', 'source',
+             'shippingAddress', 'notes', 'policyConsent', 'deliveryZoneId', 'deliveryZoneName', 'deliveryZoneNameAr',
+             'createdAt', 'updatedAt'])
+        && request.resource.data.lines.size() > 0
+        && request.resource.data.lines.size() <= 8
+        // A web checkout must always name a real delivery zone -- there is
+        // no "no zone selected" order anymore, matching Checkout.tsx's own
+        // required-selection guard.
+        && request.resource.data.deliveryZoneId is string
+        && request.resource.data.deliveryZoneId.size() > 0
+        && isValidShippingForOrder(request.resource.data.subtotal, request.resource.data.shipping, request.resource.data.deliveryZoneId)
+        && (request.resource.data.get('discountId', null) == null
+              ? request.resource.data.get('discount', 0) == 0
+              : isValidDiscountForOrder(request.resource.data.discountId, request.resource.data.get('discount', 0), request.resource.data.subtotal))
+        && request.resource.data.total == request.resource.data.subtotal - request.resource.data.get('discount', 0) + request.resource.data.shipping
+        // Required, not optional: a web checkout create with no policyConsent
+        // at all (field missing) fails this line closed, same as any other
+        // required field above — see orderTransaction.ts's own client-side
+        // guard for the matching friendly error.
+        && isValidPolicyConsent(request.resource.data.policyConsent)
+        && checkoutOrderMatchesClaim();
+    }
+
+    function checkoutOrderMatchesClaim() {
+      let claim = getAfter(/databases/$(database)/documents/checkoutClaims/$(request.auth.uid)).data;
+      return orderLinesMatchClaim(request.resource.data.lines, claim.lines)
+        && request.resource.data.subtotal == claimSubtotal(claim.lines);
+    }
+
+    // Lets an identified customer's own checkout increment their CRM stats
+    // in the same transaction — guest (anonymous) checkouts skip this,
+    // since guests have no customers/{uid} doc. totalSpent tracks product
+    // subtotal only (not shipping), a simplification, not a security gap.
+    function isValidOrderStatsIncrement(id) {
+      let claimedSubtotal = claimSubtotal(
+        getAfter(/databases/$(database)/documents/checkoutClaims/$(id)).data.lines);
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ordersCount', 'totalSpent', 'updatedAt'])
+        && request.resource.data.ordersCount == resource.data.ordersCount + 1
+        && request.resource.data.totalSpent == resource.data.totalSpent + claimedSubtotal;
+    }
+
+    // A customer's own saved-address book (see CustomerAddress in
+    // admin/types.ts) — only the whole `addresses` list can move, capped at
+    // a sane size. Deliberately doesn't validate individual entry shape or
+    // the "at most one isDefault" invariant here (that's enforced
+    // client-side): this write can only ever touch the requester's own
+    // doc, nothing else reads addresses to make a security- or money-
+    // relevant decision, and the worst outcome of a malformed entry is a
+    // rendering glitch in that customer's own account page — the same
+    // proportionate-risk call already made for other self-contained,
+    // self-scoped writes in this file.
+    function isValidAddressesUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['addresses', 'updatedAt'])
+        && request.resource.data.addresses is list
+        && request.resource.data.addresses.size() <= 10;
+    }
+
+    // --- One-time first-owner bootstrap ----------------------------------
+    // Before anyone has signed up, this doc doesn't exist, which is what
+    // unlocks the single self-serve admin-account creation below. The
+    // client creates this doc in the SAME batch as the admins/{uid} doc,
+    // so the two either both succeed or both fail; once it exists, no
+    // further self-serve admin creation is possible for anyone.
+    match /system/bootstrap {
+      allow read: if true;
+      allow create: if isSignedIn() && !bootstrapClaimed() && request.resource.data.ownerClaimed == true;
+      allow update, delete: if isOwner();
+    }
+
+    // --- Admin accounts ---------------------------------------------------
+    // --- POS device links -------------------------------------------------
+    // Each POS register can have a secret link (/pos/<token>, token = doc id,
+    // 192 random bits). Opening it signs the device in anonymously and lets
+    // it register ITSELF as a cashier pinned to exactly that link's branch
+    // and register -- from then on every existing cashier rule (sessions,
+    // sales, branch stock) applies to it unchanged; nothing below this
+    // section knows devices exist. Revoking a link deactivates its devices'
+    // admins docs (done by the admin UI in the same batch), which is what
+    // actually cuts them off: every role check reads admins/{uid}.active.
+    //
+    // Opening a link reserves nothing: any device holding the token may
+    // register for it. A register is only taken while a shift is open on it
+    // (registers.openSessionId, see isValidRegisterLockChange), and a
+    // session can only be sold on by the identity that opened it.
+    function isValidPosDeviceClaim(uid) {
+      let d = request.resource.data;
+      let link = getAfter(/databases/$(database)/documents/posLinks/$(d.posLink)).data;
+      return request.auth.uid == uid
+        && d.keys().hasOnly(['email', 'displayName', 'role', 'active', 'branchIds', 'registerIds', 'posLink', 'createdAt', 'updatedAt'])
+        && d.role == 'cashier'
+        && d.active == true
+        && d.email == ''
+        && d.displayName is string && d.displayName.size() > 0 && d.displayName.size() <= 80
+        && link.active == true
+        && d.branchIds == [link.branchId]
+        && d.registerIds == [link.registerId];
+    }
+
+    match /posLinks/{token} {
+      // Holding the token IS the credential, so a direct get is open (a
+      // device has no other identity yet when it checks its link); listing
+      // them is admin-only.
+      allow get: if true;
+      allow list: if isAdminOrAbove();
+      allow create: if isAdminOrAbove()
+        && token.size() >= 32
+        && request.resource.data.branchId is string
+        && request.resource.data.registerId is string
+        && request.resource.data.active == true;
+      // Admins revoke links; devices never write them.
+      allow update: if isAdminOrAbove()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active', 'revokedAt', 'updatedAt']);
+      allow delete: if isAdminOrAbove();
+    }
+
+    match /admins/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAnyAdmin());
+      allow create: if isOwner()
+        || (request.auth.uid == uid && request.resource.data.role == 'owner' && !bootstrapClaimed())
+        || isValidPosDeviceClaim(uid);
+      // A device may re-register itself (e.g. after its old link was
+      // revoked and a new one issued) -- only ever an existing DEVICE doc,
+      // never a real staff account. Owner/admin may deactivate/remove
+      // device docs (revoking a link); real staff docs stay owner-only.
+      allow update: if isOwner()
+        || (isAdminOrAbove() && resource.data.get('posLink', null) is string
+            && request.resource.data.get('posLink', null) == resource.data.posLink
+            && request.resource.data.role == 'cashier')
+        || (resource.data.get('posLink', null) is string && isValidPosDeviceClaim(uid));
+      allow delete: if isOwner() || (isAdminOrAbove() && resource.data.get('posLink', null) is string);
+    }
+
+    // --- Branches, registers and per-branch stock (multi-branch POS) -----
+    match /branches/{id} {
+      allow read: if isAnyAdmin();
+      allow write: if isAdminOrAbove();
+    }
+
+    // openSessionId is the register's lock. Besides owner/admin edits, the
+    // only write a cashier can make is taking or releasing that lock, and
+    // only together with the session that justifies it (getAfter: same
+    // batch/transaction) -- so one register can never have two open sessions.
+    function isValidRegisterLockChange(id) {
+      let before = resource.data.get('openSessionId', null);
+      let after = request.resource.data.get('openSessionId', null);
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['openSessionId', 'updatedAt'])
+        && canSellAtBranch(resource.data.branchId)
+        && ((before == null && after is string
+              && getAfter(/databases/$(database)/documents/registerSessions/$(after)).data.registerId == id
+              && getAfter(/databases/$(database)/documents/registerSessions/$(after)).data.cashierId == request.auth.uid
+              && getAfter(/databases/$(database)/documents/registerSessions/$(after)).data.status == 'open')
+          || (before is string && after == null
+              && getAfter(/databases/$(database)/documents/registerSessions/$(before)).data.cashierId == request.auth.uid
+              && getAfter(/databases/$(database)/documents/registerSessions/$(before)).data.status == 'closed'));
+    }
+
+    match /registers/{id} {
+      allow read: if isAnyAdmin();
+      allow create: if isAdminOrAbove() && request.resource.data.branchId is string;
+      // number is permanent once set (used in calculations/reports).
+      allow update: if (isAdminOrAbove() && request.resource.data.branchId == resource.data.branchId
+          && (!('number' in resource.data) || request.resource.data.get('number', null) == resource.data.number))
+        || isValidRegisterLockChange(id);
+      allow delete: if isAdminOrAbove();
+    }
+
+    // Editors and above set branch counts directly (Branch Stock page /
+    // return restocks). A cashier may only decrement their own branch's stock
+    // exactly like a web checkout decrements a product's online stock: only
+    // the claimed cells, by exactly the claimed quantities
+    // (stockDecreaseMatchesClaimFlat, reused as-is -- it only reads
+    // resource.data/request.resource.data.stockByCell).
+    //
+    // Expression budget: a full 8-line sale against one large product sits
+    // right at the 1000-expressions-per-request cap (see the flat-schema
+    // notes above), so this reads the admin doc ONCE and branches on role
+    // with a ternary -- never evaluating the editor path and the sale path
+    // both, and never paying for a second role helper's exists()/get().
+    // Confirmed by tests/rules/pos-branches.test.ts' worst-case test.
+    function isValidBranchStockWrite() {
+      let a = adminDoc().data;
+      return a.active == true
+        && (a.role in ['owner', 'admin', 'editor']
+            ? request.resource.data.branchId == resource.data.branchId
+              && request.resource.data.productId == resource.data.productId
+              && request.resource.data.stockByCell is map
+            : a.role == 'cashier'
+              && resource.data.branchId in a.get('branchIds', [])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stockByCell', 'updatedAt'])
+              && request.resource.data.stockByCell is map
+              && stockDecreaseMatchesClaimFlat(resource.data.productId));
+    }
+
+    match /branchStock/{id} {
+      // Any staff member may see every branch's stock (cashiers check what
+      // other branches have); only their own branch's can be sold from.
+      allow read: if isAnyAdmin();
+      allow create: if isEditorOrAbove()
+        && request.resource.data.branchId is string
+        && request.resource.data.productId is string
+        && id == request.resource.data.branchId + '__' + request.resource.data.productId
+        && request.resource.data.stockByCell is map;
+      allow update: if isSignedIn() && isValidBranchStockWrite();
+      allow delete: if isEditorOrAbove();
+    }
+
+    // --- Public storefront content (read-open, admin-write) --------------
+    // Draft/archived products stay admin-only until they're published, even
+    // though the storefront's own listing already filters them out.
+    match /products/{id} {
+      allow read: if resource.data.status == 'active' || isAnyAdmin();
+      allow create, delete: if isEditorOrAbove();
+      // isEditorOrAbove() checked FIRST. Confirmed empirically against
+      // production (not just the emulator): when isValidStockDecrement(id)
+      // is evaluated first and a real decrement is being written, an error
+      // partway through its evaluation denies the WHOLE write even when
+      // isEditorOrAbove() independently would have allowed it — Firestore's
+      // rule evaluator does not reliably fall through to the right side of
+      // `||` once the left side errors. Putting the cheap, error-free admin
+      // check first means it's the one actually relied on for admin/owner
+      // writes; isValidStockDecrement(id) is only ever reached — and only
+      // ever needs to behave — for genuine non-admin checkout writes.
+      allow update: if isEditorOrAbove() || isValidStockDecrement(id);
+    }
+
+    match /categories/{id} {
+      allow read: if true;
+      allow write: if isEditorOrAbove();
+    }
+
+    match /siteContent/{id} {
+      allow read: if true;
+      allow write: if isEditorOrAbove();
+    }
+
+    match /settings/{id} {
+      allow read: if true;
+      allow write: if isAdminOrAbove();
+    }
+
+    match /reviews/{id} {
+      allow read: if isAnyAdmin() || resource.data.status == 'approved';
+      // A real (non-anonymous) signed-in customer may submit their own
+      // review, always landing as 'pending' — never able to self-approve,
+      // rate/write as someone else, or touch an existing review (that's
+      // update/delete, still editor-only below). Simple single-document
+      // shape check, no cross-references — nothing like the checkout
+      // transaction's cost profile.
+      allow create: if isEditorOrAbove()
+        || (isIdentifiedUser()
+            && request.resource.data.status == 'pending'
+            && request.resource.data.rating is int
+            && request.resource.data.rating >= 1 && request.resource.data.rating <= 5
+            && request.resource.data.body is string
+            && request.resource.data.body.size() > 0 && request.resource.data.body.size() <= 2000
+            && request.resource.data.author is string
+            && request.resource.data.author.size() > 0 && request.resource.data.author.size() <= 100
+            && request.resource.data.productId is string
+            && request.resource.data.productName is string
+            && request.resource.data.keys().hasOnly(['productId', 'productName', 'author', 'rating', 'title', 'body', 'status', 'createdAt', 'updatedAt']));
+      allow update, delete: if isEditorOrAbove();
+    }
+
+    // --- Admin-only operational data --------------------------------------
+    match /media/{id} {
+      allow read: if isAnyAdmin();
+      allow write: if isEditorOrAbove();
+    }
+
+    // Admins see everything (including inactive/expired codes, for
+    // management). Signed-in customers/guests may read an ACTIVE code —
+    // discount codes aren't secret (meant to be typed/shared), so this only
+    // exposes what a customer needs to validate a code they already typed
+    // in at checkout, nothing an admin wouldn't willingly hand out anyway.
+    match /discounts/{id} {
+      allow read: if isAnyAdmin() || resource.data.active == true;
+      allow create, delete: if isEditorOrAbove();
+      // A non-admin checkout may ONLY increment usageCount by exactly 1 on
+      // an already-active code, touching no other field. This is fired as
+      // a separate, standalone write AFTER a successful checkout completes
+      // — deliberately NOT folded into the checkout transaction itself, to
+      // avoid adding any cost to that transaction's already-tight
+      // expression-evaluation budget (see the long comment on
+      // checkoutClaims above — this exact class of addition is what caused
+      // a real production outage earlier). The usage limit itself is
+      // enforced client-side before checkout; a determined attacker could
+      // increment past it, but worst case is a code used a few extra
+      // times — an admin-correctable inaccuracy, not a price-tampering or
+      // privilege-escalation risk.
+      allow update: if isEditorOrAbove()
+        || (isSignedIn() && resource.data.active == true
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['usageCount', 'updatedAt'])
+            && request.resource.data.usageCount == resource.data.usageCount + 1);
+    }
+
+    // Delivery cities/regions and their fees (replaces the old Standard/
+    // Express settings/shipping fields). Read mirrors discounts/{id} exactly
+    // — a signed-in shopper (including an anonymous guest) needs to read
+    // every ACTIVE zone to populate the checkout dropdown and its live fee
+    // preview; zones aren't secret. Create/update mirrors discounts/{id}/
+    // categories/products too: isEditorOrAbove() (owner/admin/editor),
+    // matching DeliveryZones.tsx's own canWrite gate. isValidShippingForOrder()
+    // above is what actually stops a customer from paying anything other than
+    // a real active zone's real fee — this collection's own rules only gate
+    // who may change the configuration itself.
+    //
+    // Deliberately NO delete rule at all (not even for owner) — a zone must
+    // be managed through activate/deactivate only, never removed, so a
+    // historical order's denormalized deliveryZoneId/Name/NameAr can never
+    // dangle. This is enforced here, not just by DeliveryZones.tsx omitting
+    // a delete button, so a direct API/console call can't bypass it either.
+    match /deliveryZones/{id} {
+      allow read: if isAnyAdmin() || resource.data.active == true;
+      allow create, update: if isEditorOrAbove();
+    }
+
+    // Cheap, get()-free field checks only — no expression-budget concern.
+    // Distinct from OrderStatus (the order's lifecycle stage) and from the
+    // returns/{id} collection (a specific product the customer DID
+    // receive and is sending back): this records that the delivery
+    // company could not deliver the package at all and returned it to
+    // Sisley. One-way once set (mirrors returns/{id}'s restocked
+    // false->true-only precedent above) — there's no "unflag" UI, and a
+    // stray write can't quietly undo a recorded incident.
+    function isValidNonDeliveryUpdate() {
+      return !('nonDeliveryFlagged' in request.resource.data)
+        || (request.resource.data.nonDeliveryFlagged is bool
+            && (resource.data.get('nonDeliveryFlagged', false) != true || request.resource.data.nonDeliveryFlagged == true)
+            && (!('nonDeliveryNote' in request.resource.data)
+                || (request.resource.data.nonDeliveryNote is string && request.resource.data.nonDeliveryNote.size() <= 500)));
+    }
+
+    // Narrow exception, reachable by owner/admin/editor/cashier (see
+    // isBranchNoteEditorOrAbove() at its one call site below -- name here
+    // predates editor's inclusion, kept as-is to minimize diff): any of
+    // those 4 roles may update ONLY the lineBranchStockNotes map (used to
+    // flag "this specific product is available at another branch, please
+    // send it over") and nothing else on the order — affectedKeys().
+    // hasOnly(...) means any write that also touches status, lines, total,
+    // etc. is rejected outright, not partially applied.
+    //
+    // What this does NOT do, and why: Firestore rules has no loop/map-
+    // iteration construct (no .all()/.exists() macro support here), so a
+    // fully generic "every entry is well-shaped and self-attributed" check
+    // isn't cheaply expressible for an arbitrarily-keyed map. Multiple
+    // per-entry validation designs were tried here (checked against the
+    // order's own real line keys, unrolled to a fixed count, mirroring
+    // orderLineQtyForReturn()'s own unrolled-index style above) and every
+    // one of them measurably hit Firestore's 1000-expression evaluation
+    // ceiling on nothing more than an order with two already-noted lines --
+    // nowhere near this collection's own tight checkout-transaction budget,
+    // yet still over the wall. Rather than ship a rule that works in testing
+    // today and fails unpredictably in production once real orders
+    // accumulate a few notes, this intentionally validates only what's cheap
+    // and unconditionally safe: the field allowlist above (so a cashier can
+    // never touch status/lines/total/price/etc. through this door) and a
+    // coarse cap on how many entries the map can hold. It does NOT enforce a
+    // per-note length cap or that each entry's updatedByUid matches the
+    // request's own uid at the rules layer.
+    //
+    // Residual risk this accepts: any of the 4 roles above could write
+    // an oversized note, or attribute an entry to a different employee's
+    // uid, by hand-crafting the request outside the app's own UI (which
+    // never does either). This can NEVER touch stock, price, status, or any
+    // other order/product data — lineBranchStockNotes is pure display text,
+    // read nowhere else in the app — so the worst case is untrustworthy
+    // ledger noise on one narrow, non-financial field, the same trust model
+    // isPlausibleSaleMovement() above already accepts for stockMovements.
+    function isValidCashierBranchNoteUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lineBranchStockNotes', 'updatedAt'])
+        && request.resource.data.lineBranchStockNotes is map
+        && request.resource.data.lineBranchStockNotes.size() <= 20;
+    }
+
+    // Phase A (employee action attribution): every "who did this" field an
+    // order document can carry must, whenever the write actually sets it,
+    // name the REQUEST'S OWN authenticated uid -- never an arbitrary other
+    // employee's. This is what makes those fields trustworthy rather than a
+    // client-asserted label; email/name snapshots on the same fields are
+    // NOT independently re-validated (they're display-only), but they can
+    // never be paired with a mismatched uid and still pass. Absence is
+    // always fine -- a write that doesn't touch a given attribution field
+    // at all skips its check; this only ever rejects a MISMATCHED uid, not
+    // a missing one, so it never demands every field be present on every
+    // update. Applied identically to both the create and update rules
+    // below, since staff can set these fields via either path (an order
+    // create for a manual/POS sale, or an order update for every other
+    // attribution field).
+    function orderActorUidFieldsValid() {
+      return (!('statusUpdatedByUid' in request.resource.data) || request.resource.data.statusUpdatedByUid == request.auth.uid)
+        && (!('cancelledByUid' in request.resource.data) || request.resource.data.cancelledByUid == request.auth.uid)
+        && (!('linesUpdatedByUid' in request.resource.data) || request.resource.data.linesUpdatedByUid == request.auth.uid)
+        && (!('internalNoteUpdatedByUid' in request.resource.data) || request.resource.data.internalNoteUpdatedByUid == request.auth.uid)
+        && (!('customerShippingUpdatedByUid' in request.resource.data) || request.resource.data.customerShippingUpdatedByUid == request.auth.uid)
+        && (!('createdByUid' in request.resource.data) || request.resource.data.createdByUid == request.auth.uid)
+        && (!('cashierUid' in request.resource.data) || request.resource.data.cashierUid == request.auth.uid)
+        && (!('nonDeliveryMarkedByUid' in request.resource.data) || request.resource.data.nonDeliveryMarkedByUid == request.auth.uid)
+        && (!('branchStockNoteUpdatedByUid' in request.resource.data) || request.resource.data.branchStockNoteUpdatedByUid == request.auth.uid)
+        // Added for the delivery-company Create Order integration
+        // (src/firebase/deliveryOrder.ts) -- same attribution-integrity
+        // guarantee as every other *ByUid field above, extended to the one
+        // new attribution field this feature writes.
+        && (!('deliverySentByUid' in request.resource.data) || request.resource.data.deliverySentByUid == request.auth.uid);
+    }
+
+    // Owner/admin: unrestricted (manual orders, a POS sale at any branch,
+    // discounts). Cashier: only a POS sale, at one of their own branches, on
+    // their own register session for that same branch, and with no
+    // discount -- POS discounts are owner/admin-only.
+    function isValidStaffOrderBranch() {
+      return adminDoc().data.role != 'cashier'
+        || (request.resource.data.get('source', '') == 'pos'
+            && request.resource.data.get('branchId', '') in myBranchIds()
+            && request.resource.data.get('discount', 0) == 0
+            && request.resource.data.get('registerSessionId', null) is string
+            && cashierSessionMatches(getAfter(/databases/$(database)/documents/registerSessions/$(request.resource.data.registerSessionId)).data));
+    }
+
+    // operatorId: on a POS device's sale, the staff member who started the
+    // shift -- must be copied from the session, never chosen per sale.
+    function cashierSessionMatches(session) {
+      return session.branchId == request.resource.data.branchId && session.cashierId == request.auth.uid
+        && request.resource.data.get('operatorId', null) == session.get('operatorId', null);
+    }
+
+    match /orders/{id} {
+      // Audit finding B1: was isAnyAdmin() (owner/admin/editor/viewer/
+      // cashier) — editor and viewer have no legitimate reason to see
+      // order/customer PII (editor is catalog-scoped, viewer is read-only
+      // catalog browsing per their role descriptions) and neither page is
+      // even reachable to them in the UI (AdminApp.tsx gates /admin/orders
+      // to owner/admin only). Narrowed to isCashierOrAbove() rather than
+      // isAdminOrAbove(): a cashier genuinely needs this for the globally-
+      // mounted GlobalOrdersSidebarPanel (order search/lookup, reachable
+      // from POS) — narrowing further would break that existing,
+      // legitimate cashier flow, not just close a PII leak.
+      //
+      // Later widened from isCashierOrAbove() to isBranchNoteEditorOrAbove()
+      // so editor can use the Branch Stock Note interaction on OrderDetail.tsx
+      // (also newly route-reachable to editor/cashier -- see AdminApp.tsx),
+      // which needs to read the order to render its line items at all. This
+      // is a real, deliberate re-widening of part of that same audit finding
+      // for editor specifically -- Firestore has no field-level read
+      // security, so there is no way to expose only lineBranchStockNotes
+      // without exposing the whole order/customer PII to whoever can read it
+      // at all. viewer remains excluded (still no legitimate reason to see
+      // order data, and still has no UI path to this page).
+      //
+      // Multi-branch: a cashier no longer sees every order -- only online
+      // (web/manual) orders, which every branch helps prepare, plus POS
+      // sales from their own branches. Another branch's POS sales are
+      // hidden. Written against `source`/`branchId` so a cashier's list
+      // query that filters on those same fields is provable (see
+      // GlobalOrdersSidebarPanel.tsx's cashier queries).
+      allow read: if isActiveAdminWithRole(['owner', 'admin', 'editor'])
+        || (isActiveAdminWithRole(['cashier'])
+            && (resource.data.get('source', '') in ['web', 'manual'] || resource.data.get('branchId', '') in myBranchIds()))
+        || (isSignedIn() && resource.data.customerId == request.auth.uid);
+      // isCashierOrAbove(), not isAdminOrAbove(), on create only: a POS
+      // sale (Phase 4) is rung up by a cashier and reuses this exact path.
+      // Editing/cancelling an existing order stays owner/admin-only.
+      // Checked FIRST (cheap) ahead of isValidCheckoutOrder()'s expensive
+      // claim cross-check, same expression-budget reasoning as above.
+      // orderActorUidFieldsValid() only ever matters on THIS branch --
+      // isValidCheckoutOrder()'s own keys().hasOnly() already excludes
+      // every staff attribution field outright, so a web checkout can never
+      // carry one at all, checked or not.
+      allow create: if (isCashierOrAbove() && orderActorUidFieldsValid() && isValidStaffOrderBranch()) || isValidCheckoutOrder();
+      // Two independent update paths: owner/admin retains full order
+      // editing (status, lines, notes, etc., subject to the non-delivery
+      // guard above); an editor or cashier gets nothing from that first
+      // branch (isAdminOrAbove() excludes both) and can ONLY ever pass
+      // through isValidCashierBranchNoteUpdate()'s narrow field allowlist
+      // (name predates editor's inclusion here -- kept to minimize diff;
+      // its actual gate is isBranchNoteEditorOrAbove() below, covering all
+      // 4 roles the Branch Stock Note feature is for). Both branches
+      // additionally require orderActorUidFieldsValid() (Phase A) so no
+      // role can attribute an action to a different employee.
+      allow update: if (isAdminOrAbove() && isValidNonDeliveryUpdate() && orderActorUidFieldsValid())
+        || (isBranchNoteEditorOrAbove() && isValidCashierBranchNoteUpdate() && orderActorUidFieldsValid());
+      allow delete: if isAdminOrAbove();
+    }
+
+    // A returned unit is never re-added to products/{id}'s stock by these
+    // rules at all — that only ever happens via the isEditorOrAbove()
+    // branch on products/{id} above, driven by the trusted
+    // resolveReturn() transaction (src/firebase/returnsTransaction.ts).
+    // This collection is purely the quarantine ledger: cashier-or-above may
+    // log an intake (against an order that has actually shipped, in the
+    // canonical unresolved starting state), but only admin-or-above may
+    // inspect/resolve it — editor is catalog-scoped elsewhere in this file
+    // and never touches orders, and returns are an order/customer-service
+    // action that happens to touch inventory, not a catalog edit. A
+    // resolved record is immutable; restocked can only ever flip
+    // false -> true, never back.
+    //
+    // returnCounterMatchesIntake() ties every intake to an authoritative,
+    // server-enforced cap on how much of a given order line can ever be
+    // returned in total (see returnCounters/{id} below) — closing what was
+    // previously a client-side-only guard (alreadyReturnedQtyForLine() in
+    // src/admin/returnsHelpers.ts, still used for the UI hint/max-qty
+    // stepper, but no longer the actual enforcement).
+    match /returns/{id} {
+      // Audit finding B1: was isAnyAdmin() — editor and viewer have no
+      // legitimate reason to see return/PII data (and /admin/returns is
+      // owner/admin-only in the UI already). Kept at isCashierOrAbove(),
+      // not narrowed to isAdminOrAbove(), because ProcessReturnModal.tsx —
+      // the cashier-reachable return-intake modal, mounted via
+      // GlobalOrdersSidebarPanel — directly queries this collection
+      // (returnsApi.list) to cap how much of a line can be re-returned;
+      // narrowing further would break that existing, legitimate flow.
+      allow read: if isCashierOrAbove();
+      allow create: if isCashierOrAbove()
+        && request.resource.data.status == 'quarantine'
+        && request.resource.data.disposition == null
+        && request.resource.data.restocked == false
+        && request.resource.data.qty is int && request.resource.data.qty > 0
+        && request.resource.data.orderId is string && request.resource.data.orderId.size() > 0
+        && request.resource.data.productId is string && request.resource.data.productId.size() > 0
+        && request.resource.data.variantId is string && request.resource.data.variantId.size() > 0
+        && request.resource.data.size is string && request.resource.data.size.size() > 0
+        && request.resource.data.reason in ['defective','wrong_size','wrong_color','changed_mind','fulfillment_error','shipping_error','other']
+        && get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.status in ['shipped','delivered','completed']
+        && returnCounterMatchesIntake()
+        // Phase A: the intake's own "who logged this" field, if present,
+        // must name the actual requester -- same reasoning as
+        // orderActorUidFieldsValid() above.
+        && (!('processedByUid' in request.resource.data) || request.resource.data.processedByUid == request.auth.uid);
+      allow update: if isAdminOrAbove()
+        && resource.data.status != 'resolved'
+        && request.resource.data.orderId == resource.data.orderId
+        && request.resource.data.productId == resource.data.productId
+        && request.resource.data.variantId == resource.data.variantId
+        && request.resource.data.size == resource.data.size
+        && request.resource.data.qty == resource.data.qty
+        && (request.resource.data.restocked == resource.data.restocked
+            || (resource.data.restocked == false && request.resource.data.restocked == true))
+        // Phase A: the resolution's own "who resolved this" field, if
+        // present, must name the actual requester.
+        && (!('resolvedByUid' in request.resource.data) || request.resource.data.resolvedByUid == request.auth.uid);
+      allow delete: if isAdminOrAbove();
+    }
+
+    // Deterministic per-order-line key, matching returnLineKey()'s "::"
+    // convention in src/admin/returnsHelpers.ts (plus the orderId, absent
+    // there since that helper is scoped to a single already-loaded order).
+    function returnCounterId(orderId, productId, variantId, size) {
+      return orderId + '::' + productId + '::' + variantId + '::' + size;
+    }
+
+    // Sums qty across every line on the order matching this exact
+    // product/variant/size (normally at most one, but summed defensively —
+    // same style as claimedQtyForProduct() above). Unrolled to 8 lines,
+    // matching MAX_LINES everywhere else in this file.
+    function orderLineQtyForReturn(lines, productId, variantId, size) {
+      return ((0 < lines.size() && lines[0].productId == productId && lines[0].variantId == variantId && lines[0].size == size) ? lines[0].qty : 0)
+        + ((1 < lines.size() && lines[1].productId == productId && lines[1].variantId == variantId && lines[1].size == size) ? lines[1].qty : 0)
+        + ((2 < lines.size() && lines[2].productId == productId && lines[2].variantId == variantId && lines[2].size == size) ? lines[2].qty : 0)
+        + ((3 < lines.size() && lines[3].productId == productId && lines[3].variantId == variantId && lines[3].size == size) ? lines[3].qty : 0)
+        + ((4 < lines.size() && lines[4].productId == productId && lines[4].variantId == variantId && lines[4].size == size) ? lines[4].qty : 0)
+        + ((5 < lines.size() && lines[5].productId == productId && lines[5].variantId == variantId && lines[5].size == size) ? lines[5].qty : 0)
+        + ((6 < lines.size() && lines[6].productId == productId && lines[6].variantId == variantId && lines[6].size == size) ? lines[6].qty : 0)
+        + ((7 < lines.size() && lines[7].productId == productId && lines[7].variantId == variantId && lines[7].size == size) ? lines[7].qty : 0);
+    }
+
+    // Reads the counter's pre-transaction value (0 if this is the line's
+    // first-ever return) and requires the SAME transaction to have bumped
+    // it by EXACTLY this return's qty via getAfter() — a return document
+    // can never be created without a matching, authoritative counter
+    // increment alongside it in the same commit.
+    function returnCounterMatchesIntake() {
+      let counterPath = /databases/$(database)/documents/returnCounters/$(returnCounterId(
+        request.resource.data.orderId, request.resource.data.productId, request.resource.data.variantId, request.resource.data.size));
+      let before = exists(counterPath) ? get(counterPath).data.returnedQty : 0;
+      return getAfter(counterPath).data.returnedQty == before + request.resource.data.qty;
+    }
+
+    // The authoritative running total of "how much of this exact order
+    // line has ever been returned," independent of and enforced ABOVE the
+    // client-side alreadyReturnedQtyForLine() hint — this is what makes the
+    // qty cap a real security/data-integrity boundary rather than a UI
+    // nicety a buggy or racing client could exceed. returnedQty can only
+    // ever increase (an append-only ledger, same philosophy as restocked
+    // on returns/{id} only ever flipping false -> true) and can never
+    // exceed what was actually sold on that order line — read via a single
+    // get() on the order, the same trusted source the returns/{id} create
+    // rule above already checks order status against.
+    //
+    // Firestore transactions can only get() a known, specific document (no
+    // arbitrary queries), which is exactly why this needs its own
+    // document per line rather than a live SUM query — and why Firestore's
+    // optimistic-concurrency retry-on-conflicting-read on this same
+    // document is what makes the cap race-free under concurrent submission
+    // (two cashiers processing the same line at once), not any locking.
+    //
+    // Never decremented on a returns/{id} delete: delete isn't exposed
+    // anywhere in the app UI (admin-console-only escape hatch), and an
+    // accidental under-count from a manual console delete is a strictly
+    // safer failure mode than an over-count ever would be — it can only
+    // ever make a line MORE conservative (fewer returns accepted), never
+    // let stock be corrupted.
+    match /returnCounters/{id} {
+      allow read: if isAnyAdmin();
+      allow create, update: if isCashierOrAbove()
+        && request.resource.data.orderId is string && request.resource.data.orderId.size() > 0
+        && request.resource.data.productId is string && request.resource.data.productId.size() > 0
+        && request.resource.data.variantId is string && request.resource.data.variantId.size() > 0
+        && request.resource.data.size is string && request.resource.data.size.size() > 0
+        && id == returnCounterId(request.resource.data.orderId, request.resource.data.productId, request.resource.data.variantId, request.resource.data.size)
+        && request.resource.data.returnedQty is int
+        && request.resource.data.returnedQty > (resource != null ? resource.data.returnedQty : 0)
+        && request.resource.data.returnedQty <= orderLineQtyForReturn(
+             get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.lines,
+             request.resource.data.productId, request.resource.data.variantId, request.resource.data.size)
+        && (resource == null
+            || (request.resource.data.orderId == resource.data.orderId
+                && request.resource.data.productId == resource.data.productId
+                && request.resource.data.variantId == resource.data.variantId
+                && request.resource.data.size == resource.data.size));
+      allow delete: if false;
+    }
+
+    // --- Stock Movement Ledger (Phase 1: schema + rules only; no code path
+    // writes here yet — see src/admin/types.ts's StockMovement doc comment
+    // and src/admin/stockMovements.ts's computeStockDeltas()). Append-only,
+    // same immutability precedent as activityLogs/{id} above: nobody,
+    // including an owner, may ever edit or delete a historical entry.
+    //
+    // Two trust boundaries, deliberately mirroring products/{id}'s own two-
+    // branch update rule above: an admin-initiated stock change (Inventory,
+    // Product Form, admin order-line edits, return resolution) is fully
+    // trusted the same way products/{id} already trusts isEditorOrAbove()
+    // unconditionally — no shape check needed for that branch, same as
+    // products/{id} itself has none for it. A checkout-initiated sale is
+    // written by the purchasing customer's own client (or a cashier's, for
+    // POS) — the same principal as the paired products/{id} write that
+    // isValidStockDecrement() already validates in full for that exact
+    // request. isPlausibleSaleMovement() deliberately does NOT re-derive or
+    // cross-check that pairing via get()/getAfter() — doing so would add
+    // get()s and CEL-expression cost to the checkout transaction on top of
+    // isValidStockDecrement()'s own already-tight budget (see that
+    // function's history above, and productVariants.ts's
+    // exceedsCheckoutSafeLimit() comment for the production incident this
+    // exact budget already caused once). Verified empirically safe at
+    // checkout's real worst case (8 lines, 8 distinct products, a discount
+    // code, an identified customer) via the local emulator before this was
+    // written — see the Phase 0 verification report.
+    //
+    // The residual risk this accepts: a signed-in principal could write a
+    // structurally-valid but fabricated movement row unconnected to a real
+    // sale (ledger noise) — they can NOT use this to touch real stock
+    // (products/{id} is a fully separate, independently-audited rule), and
+    // can never edit or hide a real entry (update/delete below are always
+    // false). Same trust model activityLogs/{id} already operates under
+    // today, applied to a more structured collection.
+    function isPlausibleSaleMovement() {
+      return isSignedIn()
+        && request.resource.data.reason == 'sale'
+        && request.resource.data.source in ['web', 'pos']
+        && request.resource.data.productId is string && request.resource.data.productId.size() > 0
+        && request.resource.data.variantId is string && request.resource.data.variantId.size() > 0
+        && request.resource.data.size is string && request.resource.data.size.size() > 0
+        && request.resource.data.qtyBefore is int
+        && request.resource.data.qtyChange is int && request.resource.data.qtyChange < 0
+        && request.resource.data.qtyAfter is int;
+    }
+
+    // Phase A: whenever a movement names an actor at all (absent entirely
+    // for an honest web-checkout sale -- see PlaceOrderInput's own comment
+    // in orderTransaction.ts), it must be the request's own uid. Applied to
+    // BOTH create branches below -- admin/editor-initiated stock changes
+    // and a checkout-initiated sale (POS sets actorUid; web deliberately
+    // never does).
+    function stockMovementActorUidValid() {
+      return !('actorUid' in request.resource.data) || request.resource.data.actorUid == request.auth.uid;
+    }
+
+    match /stockMovements/{id} {
+      allow read: if isAnyAdmin();
+      allow create: if (isEditorOrAbove() && stockMovementActorUidValid()) || (isPlausibleSaleMovement() && stockMovementActorUidValid());
+      allow update, delete: if false;
+    }
+
+    // A POS register session is fully trusted to its own cashier (no
+    // getAfter()/claim cross-check needed, unlike checkout) — a cashier can
+    // only ever read/write sessions everyone can see, and only open/update
+    // their own. "No other open session for this cashier" isn't expressible
+    // in rules (no queries), so that's enforced client-side with an admin
+    // able to see and force-close a stuck session as the backstop.
+    match /registerSessions/{id} {
+      allow read: if isAnyAdmin();
+      allow create: if isCashierOrAbove()
+        && request.resource.data.cashierId == request.auth.uid
+        && request.resource.data.status == 'open'
+        && request.resource.data.salesCount == 0
+        && request.resource.data.cashTotal == 0
+        && request.resource.data.cardTotal == 0
+        && request.resource.data.discountTotal == 0
+        && request.resource.data.grossTotal == 0
+        && request.resource.data.get('cashOutTotal', 0) == 0
+        // POS device shifts: the picked staff member must be a real, active
+        // cashier (never a device identity or an owner/admin) of this branch.
+        && (!('operatorId' in request.resource.data) || isValidShiftOperator(request.resource.data.operatorId, request.resource.data.branchId))
+        // Multi-branch: every session runs on a real, active register of a
+        // branch the cashier may sell at, and takes that register's lock in
+        // the same write (see isValidRegisterLockChange).
+        && request.resource.data.branchId is string
+        && canSellAtBranch(request.resource.data.branchId)
+        && request.resource.data.registerId is string
+        && getAfter(/databases/$(database)/documents/registers/$(request.resource.data.registerId)).data.branchId == request.resource.data.branchId
+        && getAfter(/databases/$(database)/documents/registers/$(request.resource.data.registerId)).data.active == true
+        && getAfter(/databases/$(database)/documents/registers/$(request.resource.data.registerId)).data.openSessionId == id;
+      // Cashier-owns-their-own-session checked first: it's the overwhelming
+      // common case (every POS sale updates it) and isAdminOrAbove()'s own
+      // role check is no cheaper, so trying it first only wastes expression
+      // budget on the common path for no benefit.
+      //
+      // Phase A: cashierId/cashierName (the OPENER's identity) are frozen
+      // for every update, including by an admin -- there is no legitimate
+      // reason to ever reassign who opened a session after the fact, and
+      // the audit specifically called out that nothing previously stopped
+      // this. closedByUid (the CLOSER's identity, a separate field -- see
+      // closedByUid/closedByEmail/closedByName in types.ts), when present,
+      // must name the actual requester; it may differ from cashierId,
+      // since closing someone else's session is an admin-level action this
+      // rule already permits via the isAdminOrAbove() branch.
+      // .get(field, null) rather than raw dot-access: cashierName isn't
+      // actually required by the create rule above (only cashierId,
+      // status, and the zeroed totals are), so a session predating that
+      // convention -- or any other legitimately cashierName-less document
+      // -- must compare as "absent on both sides", not throw and deny the
+      // whole update outright.
+      allow update: if ((isCashierOrAbove() && resource.data.cashierId == request.auth.uid) || isAdminOrAbove())
+        && request.resource.data.get('cashierId', null) == resource.data.get('cashierId', null)
+        && request.resource.data.get('cashierName', null) == resource.data.get('cashierName', null)
+        && request.resource.data.get('branchId', null) == resource.data.get('branchId', null)
+        && request.resource.data.get('registerId', null) == resource.data.get('registerId', null)
+        && request.resource.data.get('operatorId', null) == resource.data.get('operatorId', null)
+        && (!('closedByUid' in request.resource.data) || request.resource.data.closedByUid == request.auth.uid);
+      allow delete: if isAdminOrAbove();
+    }
+
+    function isValidShiftOperator(operatorId, branchId) {
+      let op = get(/databases/$(database)/documents/admins/$(operatorId)).data;
+      return op.active == true
+        && op.get('posLink', null) == null
+        && op.role == 'cashier'
+        && branchId in op.get('branchIds', []);
+    }
+
+    // Cash taken out of a till's drawer during a shift. Written only together
+    // with the session's cashOutTotal (getAfter: same transaction), by the
+    // session's own cashier or an owner/admin, while the session is open.
+    // Immutable: the shift's cash reconciliation depends on it.
+    function isValidCashWithdrawal() {
+      let d = request.resource.data;
+      let before = get(/databases/$(database)/documents/registerSessions/$(d.sessionId)).data;
+      let after = getAfter(/databases/$(database)/documents/registerSessions/$(d.sessionId)).data;
+      return before.status == 'open'
+        && (before.cashierId == request.auth.uid || isAdminOrAbove())
+        && d.branchId == before.get('branchId', '')
+        && d.registerId == before.get('registerId', '')
+        && math.abs(after.get('cashOutTotal', 0) - (before.get('cashOutTotal', 0) + d.amount)) < 0.005;
+    }
+
+    match /cashMovements/{id} {
+      allow read: if isAnyAdmin();
+      allow create: if isCashierOrAbove()
+        && request.resource.data.keys().hasOnly(['sessionId', 'branchId', 'registerId', 'type', 'amount', 'reason', 'actorUid', 'actorName', 'createdAt'])
+        && request.resource.data.type == 'withdrawal'
+        && request.resource.data.amount is number
+        && request.resource.data.amount > 0
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.actorName is string
+        && request.resource.data.get('reason', '') is string
+        && request.resource.data.get('reason', '').size() <= 200
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.sessionId is string
+        && isValidCashWithdrawal();
+      allow update, delete: if false;
+    }
+
+    // A customer's own profile doc is keyed by their own uid (mirroring how
+    // admins/{uid} works), so a shopper can read/maintain their own record;
+    // admin-owned fields (ordersCount, totalSpent, tags, notes) stay off
+    // limits to self-service writes — only a real transaction or an admin
+    // may touch those.
+    match /customers/{id} {
+      allow read: if isAnyAdmin() || (isSignedIn() && request.auth.uid == id);
+      // Audit finding B1: the isAnyAdmin() branch here had NO field
+      // restriction at all (unlike the self-serve branch below it), so a
+      // "read-only" viewer or a catalog-scoped editor/cashier could create
+      // an arbitrary-schema CRM lead — directly contradicting their own
+      // documented role scope. Narrowed to isAdminOrAbove(): the only real
+      // caller of this branch is CustomerList.tsx's manual "add lead" form,
+      // already owner/admin-only in the UI (AdminApp.tsx), so no existing
+      // functionality (cashier, editor, viewer, or self-serve signup below)
+      // depends on the wider grant.
+      allow create: if isAdminOrAbove()
+        || (isIdentifiedUser() && request.auth.uid == id
+            && request.resource.data.keys().hasOnly(['uid', 'authProvider', 'photoURL', 'name', 'email', 'phone', 'ordersCount', 'totalSpent', 'createdAt', 'updatedAt'])
+            && request.resource.data.ordersCount == 0
+            && request.resource.data.totalSpent == 0);
+      allow update: if (isIdentifiedUser() && request.auth.uid == id
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'phone', 'photoURL', 'updatedAt']))
+        || (isIdentifiedUser() && request.auth.uid == id && isValidOrderStatsIncrement(id))
+        || (isIdentifiedUser() && request.auth.uid == id && isValidAddressesUpdate())
+        || isAdminOrAbove();
+      allow delete: if isAdminOrAbove();
+    }
+
+    match /notifications/{id} {
+      allow read: if isAnyAdmin();
+      allow update, delete: if isAdminOrAbove();
+      // Admin/owner keeps its existing unconditional create (unchanged from
+      // the previous `allow write`). The second branch is a narrow,
+      // structurally-validated exception so a low-stock alert can be raised
+      // as a side effect of a legitimate stock decrease WITHOUT requiring
+      // admin/owner privilege for that one write — checkout is normally run
+      // by a guest or identified customer, and POS by a cashier, neither of
+      // which is isAdminOrAbove(). Mirrors the same "narrow, structurally-
+      // validated exception for an otherwise-unprivileged actor" shape
+      // already used for checkoutClaims/isValidStockDecrement above. Not
+      // cross-checked against the real product/stock state — that would
+      // cost an extra get() on the hot checkout path for little benefit.
+      // The worst a malicious signed-in actor can do with this is spam the
+      // shared admin notification feed with fake low_stock alerts: a self-
+      // contained, admin-correctable nuisance (same risk class already
+      // accepted for checkoutClaims above), never a way to read/alter
+      // inventory, orders, or anyone else's data. It can only ever CREATE a
+      // brand-new unread low_stock notification — never edit or delete an
+      // existing one.
+      allow create: if isAdminOrAbove()
+        || (isSignedIn() && isValidLowStockNotification(request.resource.data));
+    }
+
+    function isValidLowStockNotification(data) {
+      return data.kind == 'low_stock'
+        && data.read == false
+        && data.title is string
+        && data.body is string
+        && data.keys().hasOnly(['kind', 'title', 'body', 'link', 'read', 'createdAt', 'updatedAt']);
+    }
+
+    // Append-only audit trail: any admin action may write a new entry,
+    // nobody may edit or delete history (including owners).
+    //
+    // Phase A: actorUid is mandatory and must be the request's own uid --
+    // previously this collection had NO field validation at all, so any
+    // signed-in admin-level account (including the lowest-privileged
+    // viewer/cashier, both admitted by isAnyAdmin()) could write an entry
+    // falsely attributing an action to a different named employee, with no
+    // server-side check to catch it. actorEmail/actorName stay unvalidated
+    // (display-only snapshots, exactly like every other actor field in this
+    // file), but they can no longer be paired with a spoofed uid.
+    match /activityLogs/{id} {
+      allow read: if isAdminOrAbove();
+      allow create: if isAnyAdmin() && request.resource.data.actorUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // --- Website analytics (public write, admin-only read) ----------------
+    // No backend, so these counters are written directly by anonymous
+    // storefront visitors — most never sign in at all (see
+    // CustomerAuthContext: anonymous auth is only triggered lazily, at
+    // checkout). Writes are wide open but tightly shaped: only specific
+    // numeric counter fields are ever accepted, never negative, and nothing
+    // identifying about the visitor is ever stored (see src/analytics/
+    // track.ts — a random per-tab session id is the only "identity", never
+    // tied to a person). Reads are admin-only, so raw traffic data never
+    // leaks to the public or to other visitors.
+    function isCounterInt(v) {
+      return v is int && v >= 0;
+    }
+
+    match /presence/{sessionId} {
+      allow read: if isAnyAdmin();
+      allow create, update: if request.resource.data.keys().hasOnly(['lastSeen', 'expiresAt'])
+        && request.resource.data.lastSeen is timestamp
+        && request.resource.data.expiresAt is timestamp;
+      allow delete: if isAnyAdmin();
+    }
+
+    match /analyticsDaily/{date} {
+      allow read: if isAnyAdmin();
+      allow create, update: if request.resource.data.keys().hasOnly(['date', 'pageviews', 'visits'])
+        && request.resource.data.date is string
+        && (!('pageviews' in request.resource.data) || isCounterInt(request.resource.data.pageviews))
+        && (!('visits' in request.resource.data) || isCounterInt(request.resource.data.visits));
+      allow delete: if false;
+    }
+
+    match /productStats/{id} {
+      allow read: if isAnyAdmin();
+      allow create, update: if request.resource.data.keys().hasOnly(['views', 'quickAdds'])
+        && (!('views' in request.resource.data) || isCounterInt(request.resource.data.views))
+        && (!('quickAdds' in request.resource.data) || isCounterInt(request.resource.data.quickAdds));
+      allow delete: if false;
+    }
+
+    match /categoryStats/{id} {
+      allow read: if isAnyAdmin();
+      allow create, update: if request.resource.data.keys().hasOnly(['views'])
+        && isCounterInt(request.resource.data.views);
+      allow delete: if false;
+    }
+
+    match /productViewsDaily/{id} {
+      allow read: if isAnyAdmin();
+      allow create, update: if request.resource.data.keys().hasOnly(['date', 'productId', 'views', 'quickAdds'])
+        && request.resource.data.date is string
+        && request.resource.data.productId is string
+        && (!('views' in request.resource.data) || isCounterInt(request.resource.data.views))
+        && (!('quickAdds' in request.resource.data) || isCounterInt(request.resource.data.quickAdds));
+      allow delete: if false;
+    }
+
+    match /categoryViewsDaily/{id} {
+      allow read: if isAnyAdmin();
+      allow create, update: if request.resource.data.keys().hasOnly(['date', 'category', 'views'])
+        && request.resource.data.date is string
+        && request.resource.data.category is string
+        && isCounterInt(request.resource.data.views);
+      allow delete: if false;
+    }
+
+    // --- Newsletter signups (public write, admin-only read) ---------------
+    // Same shape of problem as the analytics counters above: no backend, so
+    // the footer signup form is written directly by an anonymous visitor who
+    // has usually never signed in. Create is therefore open but tightly
+    // shaped — exactly an email string and a createdAt, nothing else, with a
+    // length bound so the collection can't be used as free storage. Reads are
+    // admin-only: a subscriber list is customer data and must never be
+    // enumerable by the public. Nobody but a real admin may edit or remove an
+    // entry, so a visitor can't unsubscribe someone else.
+    match /newsletterSubscribers/{id} {
+      allow read: if isAnyAdmin();
+      allow create: if request.resource.data.keys().hasOnly(['email', 'createdAt'])
+        && request.resource.data.email is string
+        && request.resource.data.email.size() > 0
+        && request.resource.data.email.size() < 200;
+      allow update, delete: if isAdminOrAbove();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
