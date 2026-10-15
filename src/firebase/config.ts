@@ -62,7 +62,12 @@ if (isFirebaseConfigured) {
   // etc.) are legitimately `undefined` rather than omitted — without this,
   // the Firestore SDK throws on any write containing such a field instead
   // of just dropping it.
-  dbInstance = initializeFirestore(app, { ignoreUndefinedProperties: true });
+  // VITE_FIREBASE_DATABASE_ID: a named Firestore database, for a project
+  // that hosts several apps each with its own database. Unset = (default).
+  const databaseId = import.meta.env.VITE_FIREBASE_DATABASE_ID || undefined;
+  dbInstance = databaseId
+    ? initializeFirestore(app, { ignoreUndefinedProperties: true }, databaseId)
+    : initializeFirestore(app, { ignoreUndefinedProperties: true });
   if (useFirebaseEmulators) {
     connectFirestoreEmulator(dbInstance, "127.0.0.1", emulatorPorts.firestore);
   }

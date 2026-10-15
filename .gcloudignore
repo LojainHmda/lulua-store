@@ -1,0 +1,6 @@
+# Cloud Run source upload: only the prebuilt app and its server config.
+*
+!Dockerfile
+!nginx.conf
+!dist/
+!dist/**
