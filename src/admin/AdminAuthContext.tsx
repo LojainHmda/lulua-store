@@ -9,7 +9,7 @@ import {
 import { doc, getDoc, onSnapshot, serverTimestamp, writeBatch } from "firebase/firestore";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { auth } from "../firebase/auth";
-import { db, isFirebaseConfigured, useFirebaseEmulators } from "../firebase/config";
+import { db, isFirebaseConfigured } from "../firebase/config";
 import type { AdminRole, AdminUser } from "./types";
 
 // A bare username (no "@") signs in as <username>@lulua.local, so the local
@@ -18,11 +18,11 @@ export function toAuthEmail(login: string): string {
   return login.includes("@") ? login : `${login}@lulua.local`;
 }
 
-// Firebase Auth rejects passwords under 6 characters. Only against the local
-// emulators, short passwords are padded deterministically so a throwaway local
-// login like "admin" works; the real backend always gets the password as typed.
+// Firebase Auth rejects passwords under 6 characters, so short passwords are
+// padded deterministically: the owner's "admin" login works everywhere
+// (stored as "admin~"). Passwords of 6+ characters are sent as typed.
 function toAuthPassword(password: string): string {
-  return useFirebaseEmulators && password.length < 6 ? password.padEnd(6, "~") : password;
+  return password.length < 6 ? password.padEnd(6, "~") : password;
 }
 
 interface AdminAuthContextValue {
