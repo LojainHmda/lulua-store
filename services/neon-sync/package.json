@@ -1,0 +1,19 @@
+{
+    "name":  "lulua-neon-sync",
+    "version":  "1.0.0",
+    "description":  "Copies the store Firestore data into Neon PostgreSQL for reporting",
+    "main":  "index.js",
+    "scripts":  {
+                    "start":  "node index.js"
+                },
+    "keywords":  [
+
+                 ],
+    "author":  "",
+    "license":  "ISC",
+    "dependencies":  {
+                         "firebase-admin":  "^13.10.0",
+                         "pg":  "^8.23.1"
+                     },
+    "type":  "module"
+}
