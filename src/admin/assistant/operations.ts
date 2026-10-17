@@ -6,7 +6,7 @@
 // here ever writes to Firestore (read-only, matching Order Detail/Customer
 // Detail's own owner/admin boundary -- enforced by the route gate around
 // the panel, not re-implemented here).
-import { limit, orderBy, where } from "firebase/firestore";
+import { limit, orderBy, where } from "../../db/firestore";
 import { categoriesApi, deliveryZonesApi, ordersApi, productsApi, returnsApi } from "../../firebase/collections";
 import { getSingletonDoc } from "../../firebase/firestore";
 import { normalizeSearchText } from "../../components/admin/orderSearch";

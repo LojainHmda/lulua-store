@@ -1,6 +1,6 @@
-import { doc, getDoc, increment, serverTimestamp, setDoc, Timestamp } from "firebase/firestore";
-import { onAuthStateChanged } from "firebase/auth";
-import { db, isFirebaseConfigured } from "../firebase/config";
+import { doc, getDoc, increment, serverTimestamp, setDoc, Timestamp } from "../db/firestore";
+import { onAuthStateChanged } from "../db/auth";
+import { db, isBackendConfigured } from "../firebase/config";
 import { auth } from "../firebase/auth";
 
 // Lightweight, privacy-conscious visitor analytics for the storefront only
@@ -49,7 +49,7 @@ let readyPromise: Promise<boolean> | null = null;
 function trackingAllowed(): Promise<boolean> {
   if (readyPromise) return readyPromise;
   readyPromise = new Promise((resolve) => {
-    if (!isFirebaseConfigured) {
+    if (!isBackendConfigured) {
       resolve(false);
       return;
     }

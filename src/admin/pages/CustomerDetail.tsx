@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { where } from "firebase/firestore";
+import { where } from "../../db/firestore";
 import { customersApi, ordersApi } from "../../firebase/collections";
 import { useLanguage } from "../../context/LanguageContext";
 import AdminIcon from "../components/AdminIcons";

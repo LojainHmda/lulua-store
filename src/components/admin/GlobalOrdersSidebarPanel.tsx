@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { orderBy, limit, where } from "firebase/firestore";
+import { orderBy, limit, where } from "../../db/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { OPEN_ORDERS_PANEL_EVENT } from "../../pos/ordersPanelEvent";

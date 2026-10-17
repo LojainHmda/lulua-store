@@ -1,5 +1,5 @@
-import { assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import { doc, setDoc, updateDoc, deleteDoc } from "firebase/firestore";
+import { assertFails, assertSucceeds } from "./testing";
+import { doc, setDoc, updateDoc, deleteDoc } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, it } from "vitest";
 import { clearFirestore, getTestEnv, teardownTestEnv } from "./setup";
 
@@ -136,7 +136,7 @@ describe("notifications: low-stock create exception", () => {
     const owner = env.authenticatedContext("owner1", IDENTIFIED);
     await assertSucceeds(setDoc(doc(owner.firestore(), "notifications/existing4"), validLowStock()));
 
-    const { getDoc } = await import("firebase/firestore");
+    const { getDoc } = await import("../../src/db/firestore");
     const guest = env.authenticatedContext("mallory", ANONYMOUS);
     await assertFails(getDoc(doc(guest.firestore(), "notifications/existing4")));
   });

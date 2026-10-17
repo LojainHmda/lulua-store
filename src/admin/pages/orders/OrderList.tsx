@@ -1,4 +1,4 @@
-import { orderBy } from "firebase/firestore";
+import { orderBy } from "../../../db/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ordersApi } from "../../../firebase/collections";

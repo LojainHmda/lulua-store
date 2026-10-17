@@ -1,4 +1,4 @@
-import { doc, serverTimestamp, updateDoc } from "firebase/firestore";
+import { doc, serverTimestamp, updateDoc } from "../db/firestore";
 import { useEffect, useState, type FormEvent } from "react";
 import AccountShell from "../components/account/AccountShell";
 import Button from "../components/ui/Button";

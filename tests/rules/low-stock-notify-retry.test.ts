@@ -1,5 +1,5 @@
-import { doc, runTransaction, setDoc, updateDoc } from "firebase/firestore";
-import type { Firestore } from "firebase/firestore";
+import { doc, runTransaction, setDoc, updateDoc } from "../../src/db/firestore";
+import type { Firestore } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { findLowStockCrossings } from "../../src/admin/lowStockNotify";
 import { clearFirestore, getTestEnv, teardownTestEnv } from "./setup";

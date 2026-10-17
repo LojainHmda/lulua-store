@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, type ReactNode } from "react";
-import { where } from "firebase/firestore";
+import { where } from "../../db/firestore";
 import type { DeliveryZone, ShippingSettingsDoc } from "../../admin/types";
 import { useLanguage } from "../../context/LanguageContext";
 import { SHIPPING_DEFAULTS } from "../../data/deliveryZones";

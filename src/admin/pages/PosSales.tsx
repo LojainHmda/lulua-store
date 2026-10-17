@@ -1,4 +1,4 @@
-import { orderBy, Timestamp, where } from "firebase/firestore";
+import { orderBy, Timestamp, where } from "../../db/firestore";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { branchesApi, ordersApi, registersApi, registerSessionsApi } from "../../firebase/collections";

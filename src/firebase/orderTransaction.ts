@@ -1,4 +1,4 @@
-import { collection, deleteDoc, doc, runTransaction, serverTimestamp } from "firebase/firestore";
+import { collection, deleteDoc, doc, runTransaction, serverTimestamp } from "../db/firestore";
 import { notifyLowStock } from "../admin/lowStockNotify";
 import { normalizeProduct, stockCellKey, toStockByCell } from "../admin/productVariants";
 import { computeStockDeltas } from "../admin/stockMovements";

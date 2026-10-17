@@ -1,4 +1,4 @@
-import { orderBy } from "firebase/firestore";
+import { orderBy } from "../../db/firestore";
 import { useEffect, useState } from "react";
 import { notificationsApi } from "../../firebase/collections";
 import { getSingletonDoc, setSingletonDoc } from "../../firebase/firestore";

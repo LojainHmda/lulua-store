@@ -1,8 +1,7 @@
-import { deleteApp, initializeApp } from "firebase/app";
-import { connectAuthEmulator, createUserWithEmailAndPassword, getAuth, signInWithEmailAndPassword, updatePassword, updateProfile } from "firebase/auth";
+import { createAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, updatePassword, updateProfile } from "../../db/auth";
 import { useEffect, useState } from "react";
 import { adminsApi, branchesApi, registersApi } from "../../firebase/collections";
-import { emulatorPorts, firebaseConfig, useFirebaseEmulators } from "../../firebase/config";
+import { apiUrl } from "../../firebase/config";
 import { useLanguage } from "../../context/LanguageContext";
 import { copyText } from "../../utils/copyText";
 import { toAuthEmail, useAdminAuth } from "../AdminAuthContext";
@@ -103,10 +102,9 @@ export default function Team() {
     }
     setInviting(true);
     const password = randomPassword();
-    const secondaryApp = initializeApp(firebaseConfig, `admin-invite-${Date.now()}`);
+    // A throwaway, memory-only session, so the owner's own stays signed in.
+    const secondaryAuth = createAuth({ baseUrl: apiUrl, storageKey: null });
     try {
-      const secondaryAuth = getAuth(secondaryApp);
-      if (useFirebaseEmulators) connectAuthEmulator(secondaryAuth, `http://127.0.0.1:${emulatorPorts.auth}`, { disableWarnings: true });
       const cred = await createUserWithEmailAndPassword(secondaryAuth, toAuthEmail(email.trim()), password);
       await updateProfile(cred.user, { displayName: name.trim() });
       await secondaryAuth.signOut();
@@ -132,7 +130,6 @@ export default function Team() {
       const code = (err as { code?: string }).code ?? "";
       toast.error(code === "auth/email-already-in-use" ? t("admin.team.errEmailInUse") : t("admin.team.errCreateFailed"));
     } finally {
-      await deleteApp(secondaryApp).catch(() => {});
       setInviting(false);
     }
   }
@@ -147,7 +144,7 @@ export default function Team() {
   // controls, never through this one, so a name edit can never accidentally
   // change what an employee can do or how they sign in.
   // Right after creating an account: swap the generated password for one the
-  // owner picks. Signs in as the new account on a throwaway app instance (so
+  // owner picks. Signs in as the new account on a throwaway session (so
   // the owner's own session is untouched) and updates its password.
   async function changeNewPassword() {
     if (!tempPassword || !createdEmail) return;
@@ -156,10 +153,8 @@ export default function Team() {
       return;
     }
     setSavingPassword(true);
-    const secondaryApp = initializeApp(firebaseConfig, `admin-password-${Date.now()}`);
+    const secondaryAuth = createAuth({ baseUrl: apiUrl, storageKey: null });
     try {
-      const secondaryAuth = getAuth(secondaryApp);
-      if (useFirebaseEmulators) connectAuthEmulator(secondaryAuth, `http://127.0.0.1:${emulatorPorts.auth}`, { disableWarnings: true });
       const cred = await signInWithEmailAndPassword(secondaryAuth, createdEmail, tempPassword);
       await updatePassword(cred.user, newPassword);
       await secondaryAuth.signOut();
@@ -169,7 +164,6 @@ export default function Team() {
     } catch {
       toast.error(t("admin.team.passwordChangeFailed"));
     } finally {
-      await deleteApp(secondaryApp).catch(() => {});
       setSavingPassword(false);
     }
   }

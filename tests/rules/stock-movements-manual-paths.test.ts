@@ -1,6 +1,6 @@
-import { assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import { collection, doc, getDoc, getDocs, query, runTransaction, setDoc, where } from "firebase/firestore";
-import type { Firestore } from "firebase/firestore";
+import { assertFails, assertSucceeds } from "./testing";
+import { collection, doc, getDoc, getDocs, query, runTransaction, setDoc, where } from "../../src/db/firestore";
+import type { Firestore } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { findLowStockCrossings } from "../../src/admin/lowStockNotify";
 import { computeStockDeltas } from "../../src/admin/stockMovements";
@@ -296,7 +296,7 @@ describe("stock movement ledger: Inventory.tsx (manual_adjustment)", () => {
     // Product removed before the save runs.
     const env = await getTestEnv();
     await env.withSecurityRulesDisabled(async (ctx) => {
-      const { deleteDoc } = await import("firebase/firestore");
+      const { deleteDoc } = await import("../../src/db/firestore");
       await deleteDoc(doc(ctx.firestore(), "products/p1"));
     });
     const admin = env.authenticatedContext("admin1", IDENTIFIED);

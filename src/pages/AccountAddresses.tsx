@@ -1,4 +1,4 @@
-import { doc, serverTimestamp, updateDoc, where } from "firebase/firestore";
+import { doc, serverTimestamp, updateDoc, where } from "../db/firestore";
 import { useEffect, useState } from "react";
 import type { CustomerAddress, DeliveryZone } from "../admin/types";
 import AccountShell from "../components/account/AccountShell";

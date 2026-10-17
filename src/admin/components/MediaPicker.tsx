@@ -1,4 +1,4 @@
-import { orderBy } from "firebase/firestore";
+import { orderBy } from "../../db/firestore";
 import { useEffect, useRef, useState } from "react";
 import { mediaApi } from "../../firebase/collections";
 import { uploadMediaFile } from "../../firebase/storageUpload";

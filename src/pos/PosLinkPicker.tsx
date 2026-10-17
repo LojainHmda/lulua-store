@@ -1,4 +1,4 @@
-import { where } from "firebase/firestore";
+import { where } from "../db/firestore";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAdminAuth } from "../admin/AdminAuthContext";

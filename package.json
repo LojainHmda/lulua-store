@@ -10,12 +10,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test:rules": "vitest run --config vitest.rules.config.ts",
-    "test:unit": "vitest run --config vitest.unit.config.ts",
-    "seed:base": "node scripts/seed-base.mjs",
-    "seed:products": "node scripts/seed-products.mjs",
-    "seed:categories": "node scripts/seed-categories.mjs",
-    "save-data": "node scripts/save-data.mjs",
-    "emulators":"firebase emulators:start --config firebase.lulua.json --only auth,firestore,storage --project demo-lulua --import ./emulator-data --export-on-exit ./emulator-data"
+    "test:unit": "vitest run --config vitest.unit.config.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

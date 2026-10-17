@@ -1,4 +1,4 @@
-import { collection, getCountFromServer, limit, orderBy, query, Timestamp, where } from "firebase/firestore";
+import { collection, getCountFromServer, limit, orderBy, query, Timestamp, where } from "../../db/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { db } from "../../firebase/config";
 import {

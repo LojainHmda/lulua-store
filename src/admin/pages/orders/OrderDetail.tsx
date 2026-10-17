@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { serverTimestamp } from "firebase/firestore";
+import { serverTimestamp } from "../../../db/firestore";
 import { ordersApi, productsApi } from "../../../firebase/collections";
 import { AdminOrderEditError, updateOrderLines } from "../../../firebase/adminOrderEdit";
 import { cancelOrderAndRestoreStock, OrderCancellationError } from "../../../firebase/orderCancellation";

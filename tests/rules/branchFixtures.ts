@@ -1,4 +1,4 @@
-import { doc, setDoc } from "firebase/firestore";
+import { doc, setDoc } from "../../src/db/firestore";
 import { getTestEnv } from "./setup";
 
 // Multi-branch POS fixtures: a branch, one register in it, a staff member

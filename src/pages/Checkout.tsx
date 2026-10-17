@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from "react";
-import { where } from "firebase/firestore";
+import { where } from "../db/firestore";
 import { Link, useNavigate } from "react-router-dom";
 import { ExchangePolicyModal } from "../components/checkout/ExchangePolicyModal";
 import Button from "../components/ui/Button";

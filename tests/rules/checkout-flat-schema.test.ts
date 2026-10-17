@@ -1,5 +1,5 @@
-import { assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import { collection, doc, getDoc, runTransaction, setDoc, updateDoc } from "firebase/firestore";
+import { assertFails, assertSucceeds } from "./testing";
+import { collection, doc, getDoc, runTransaction, setDoc, updateDoc } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { clearFirestore, getTestEnv, teardownTestEnv } from "./setup";
 

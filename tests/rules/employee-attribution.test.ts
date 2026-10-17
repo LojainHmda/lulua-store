@@ -1,5 +1,5 @@
-import { assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import { collection, doc, getDocs, query, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
+import { assertFails, assertSucceeds } from "./testing";
+import { collection, doc, getDocs, query, serverTimestamp, setDoc, updateDoc } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, it } from "vitest";
 import { clearFirestore, getTestEnv, teardownTestEnv } from "./setup";
 import { seedBranchSetup } from "./branchFixtures";
@@ -641,8 +641,8 @@ describe("returns: processedByUid / resolvedByUid attribution", () => {
     };
   }
 
-  async function submitReturnWithCounter(fs: import("firebase/firestore").Firestore, returnId: string, data: Record<string, unknown>) {
-    const { runTransaction } = await import("firebase/firestore");
+  async function submitReturnWithCounter(fs: import("../../src/db/firestore").Firestore, returnId: string, data: Record<string, unknown>) {
+    const { runTransaction } = await import("../../src/db/firestore");
     const cId = `${data.orderId}::${data.productId}::${data.variantId}::${data.size}`;
     return runTransaction(fs, async (tx) => {
       const counterRef = doc(fs, "returnCounters", cId);

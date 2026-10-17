@@ -1,4 +1,4 @@
-import { collection, doc, getDocs, limit, query, runTransaction, serverTimestamp, where } from "firebase/firestore";
+import { collection, doc, getDocs, limit, query, runTransaction, serverTimestamp, where } from "../db/firestore";
 import type { Actor } from "../admin/actor";
 import type { Branch, Register, RegisterSession } from "../admin/types";
 import { db } from "./config";

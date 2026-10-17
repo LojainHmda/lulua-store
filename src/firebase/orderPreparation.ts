@@ -1,4 +1,4 @@
-import { doc, runTransaction, serverTimestamp } from "firebase/firestore";
+import { doc, runTransaction, serverTimestamp } from "../db/firestore";
 import type { Actor } from "../admin/actor";
 import {
   allLinesPrepared,

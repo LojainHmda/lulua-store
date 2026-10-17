@@ -6,7 +6,7 @@ import { useLanguage } from "../context/LanguageContext";
 import AccessDenied from "../admin/pages/AccessDenied";
 import Login from "../admin/pages/Login";
 import { PageLoading } from "../admin/components/ui";
-import { isFirebaseConfigured } from "../firebase/config";
+import { isBackendConfigured } from "../firebase/config";
 import FirebaseSetupNeeded from "../admin/pages/FirebaseSetupNeeded";
 import type { RegisterSession } from "../admin/types";
 import { findOpenSession } from "../firebase/registerSession";
@@ -155,7 +155,7 @@ function PosRoutes() {
 
 export default function PosApp() {
   useUiRootFontSize();
-  if (!isFirebaseConfigured) return <FirebaseSetupNeeded />;
+  if (!isBackendConfigured) return <FirebaseSetupNeeded />;
 
   return (
     <AdminAuthProvider>

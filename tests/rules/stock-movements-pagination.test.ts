@@ -1,4 +1,4 @@
-import { collection, doc, getDocs, limit, orderBy, query, setDoc, startAfter, Timestamp } from "firebase/firestore";
+import { collection, doc, getDocs, limit, orderBy, query, setDoc, startAfter, Timestamp } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { buildLedgerQueryConstraints, findPageCursor } from "../../src/admin/stockMovements";
 import type { StockMovement } from "../../src/admin/types";

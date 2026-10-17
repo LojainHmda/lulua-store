@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { collection, onSnapshot, query, where } from "firebase/firestore";
+import { collection, onSnapshot, query, where } from "../../db/firestore";
 import { db } from "../../firebase/config";
 import { reviewsApi } from "../../firebase/collections";
 import { useCustomerAuth } from "../../context/CustomerAuthContext";

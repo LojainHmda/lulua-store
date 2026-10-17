@@ -1,10 +1,10 @@
-import { collection, onSnapshot, orderBy, query, where } from "firebase/firestore";
+import { collection, onSnapshot, orderBy, query, where } from "../db/firestore";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import AccountShell from "../components/account/AccountShell";
 import { useCustomerAuth } from "../context/CustomerAuthContext";
 import { useLanguage, type Lang } from "../context/LanguageContext";
-import { db, isFirebaseConfigured } from "../firebase/config";
+import { db, isBackendConfigured } from "../firebase/config";
 import type { AdminOrder, OrderStatus } from "../admin/types";
 import { formatPrice } from "../utils/currency";
 
@@ -32,7 +32,7 @@ export default function AccountOrders() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!isFirebaseConfigured || !firebaseUser) {
+    if (!isBackendConfigured || !firebaseUser) {
       setOrders([]);
       setLoading(false);
       return;

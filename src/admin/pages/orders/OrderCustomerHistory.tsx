@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { where } from "firebase/firestore";
+import { where } from "../../../db/firestore";
 import { customersApi, ordersApi, returnsApi } from "../../../firebase/collections";
 import { findGuestPossibleMatches, summarizeCustomerHistory } from "../../customerHistory";
 import { useLanguage } from "../../../context/LanguageContext";

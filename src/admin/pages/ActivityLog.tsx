@@ -1,4 +1,4 @@
-import { orderBy, limit } from "firebase/firestore";
+import { orderBy, limit } from "../../db/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { activityLogApi } from "../../firebase/collections";
 import { useLanguage } from "../../context/LanguageContext";

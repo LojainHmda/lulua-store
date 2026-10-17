@@ -1,4 +1,4 @@
-import { doc, serverTimestamp, writeBatch } from "firebase/firestore";
+import { doc, serverTimestamp, writeBatch } from "../db/firestore";
 import { db } from "../firebase/config";
 import { renumberTree } from "../data/categoryTree";
 import { STORE_CATEGORY_PRESET, type PresetNode } from "../data/storeCategories";

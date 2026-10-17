@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { serverTimestamp } from "firebase/firestore";
+import { serverTimestamp } from "../../../db/firestore";
 import { ordersApi } from "../../../firebase/collections";
 import { useLanguage } from "../../../context/LanguageContext";
 import { localizedName } from "../../../data/localize";

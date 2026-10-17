@@ -1,4 +1,4 @@
-import { collection, deleteField, doc, getDocs, limit, onSnapshot, query, runTransaction, serverTimestamp, where } from "firebase/firestore";
+import { collection, deleteField, doc, getDocs, limit, onSnapshot, query, runTransaction, serverTimestamp, where } from "../../../db/firestore";
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { db } from "../../../firebase/config";

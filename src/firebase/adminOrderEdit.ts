@@ -1,4 +1,4 @@
-import { collection, doc, runTransaction, serverTimestamp } from "firebase/firestore";
+import { collection, doc, runTransaction, serverTimestamp } from "../db/firestore";
 import type { Actor } from "../admin/actor";
 import { notifyLowStock } from "../admin/lowStockNotify";
 import { normalizeProduct, toStockByCell } from "../admin/productVariants";

@@ -11,12 +11,12 @@ import {
   signOut as firebaseSignOut,
   updateProfile,
   type User,
-} from "firebase/auth";
-import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
+} from "../db/auth";
+import { doc, getDoc, onSnapshot, serverTimestamp, setDoc } from "../db/firestore";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { AdminCustomer } from "../admin/types";
 import { auth } from "../firebase/auth";
-import { db, isFirebaseConfigured } from "../firebase/config";
+import { db, isBackendConfigured } from "../firebase/config";
 
 function isIdentified(user: User | null): boolean {
   return !!user && !user.isAnonymous;
@@ -70,7 +70,7 @@ export function CustomerAuthProvider({ children }: { children: ReactNode }) {
   const [signInOpen, setSignInOpen] = useState(false);
 
   useEffect(() => {
-    if (!isFirebaseConfigured) {
+    if (!isBackendConfigured) {
       setLoading(false);
       return;
     }
@@ -85,7 +85,7 @@ export function CustomerAuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!isFirebaseConfigured || !isIdentified(firebaseUser)) return;
+    if (!isBackendConfigured || !isIdentified(firebaseUser)) return;
     setLoading(true);
     ensureProfileDoc(firebaseUser!).catch(() => {});
     const unsub = onSnapshot(

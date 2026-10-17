@@ -1,15 +1,13 @@
 import {
-  createUserWithEmailAndPassword,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
-  updateProfile,
   type User,
-} from "firebase/auth";
-import { doc, getDoc, onSnapshot, serverTimestamp, writeBatch } from "firebase/firestore";
+} from "../db/auth";
+import { doc, onSnapshot } from "../db/firestore";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { auth } from "../firebase/auth";
-import { db, isFirebaseConfigured } from "../firebase/config";
+import { db, isBackendConfigured } from "../firebase/config";
 import type { AdminRole, AdminUser } from "./types";
 
 // A bare username (no "@") signs in as <username>@lulua.local, so the local
@@ -29,10 +27,8 @@ interface AdminAuthContextValue {
   loading: boolean;
   firebaseUser: User | null;
   profile: AdminUser | null;
-  bootstrapNeeded: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signOutAdmin: () => Promise<void>;
-  bootstrapOwner: (email: string, password: string, displayName: string) => Promise<void>;
   hasRole: (roles: AdminRole[]) => boolean;
 }
 
@@ -42,17 +38,12 @@ export function AdminAuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<AdminUser | null>(null);
-  const [bootstrapNeeded, setBootstrapNeeded] = useState(false);
 
   useEffect(() => {
-    if (!isFirebaseConfigured) {
+    if (!isBackendConfigured) {
       setLoading(false);
       return;
     }
-
-    getDoc(doc(db, "system", "bootstrap")).then((snap) => {
-      setBootstrapNeeded(!snap.exists());
-    });
 
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       setFirebaseUser(user);
@@ -66,7 +57,7 @@ export function AdminAuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!isFirebaseConfigured || !firebaseUser) return;
+    if (!isBackendConfigured || !firebaseUser) return;
 
     setLoading(true);
     const unsubProfile = onSnapshot(
@@ -89,36 +80,17 @@ export function AdminAuthProvider({ children }: { children: ReactNode }) {
       loading,
       firebaseUser,
       profile,
-      bootstrapNeeded,
       async signIn(email, password) {
         await signInWithEmailAndPassword(auth, toAuthEmail(email), toAuthPassword(password));
       },
       async signOutAdmin() {
         await firebaseSignOut(auth);
       },
-      async bootstrapOwner(email, password, displayName) {
-        email = toAuthEmail(email);
-        const cred = await createUserWithEmailAndPassword(auth, email, toAuthPassword(password));
-        await updateProfile(cred.user, { displayName });
-
-        const batch = writeBatch(db);
-        batch.set(doc(db, "admins", cred.user.uid), {
-          email,
-          displayName,
-          role: "owner" satisfies AdminRole,
-          active: true,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        batch.set(doc(db, "system", "bootstrap"), { ownerClaimed: true, claimedAt: serverTimestamp() });
-        await batch.commit();
-        setBootstrapNeeded(false);
-      },
       hasRole(roles) {
         return !!profile && profile.active && roles.includes(profile.role);
       },
     }),
-    [loading, firebaseUser, profile, bootstrapNeeded]
+    [loading, firebaseUser, profile]
   );
 
   return <AdminAuthContext.Provider value={value}>{children}</AdminAuthContext.Provider>;

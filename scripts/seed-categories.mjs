@@ -1,6 +1,6 @@
 // `npm run seed:categories`: writes the store's full category tree
-// (src/data/storeCategories.ts — women's clothing / bath / home, with the
-// pajama and panty sub-options) to a LOCAL emulator database. Same result
+// (src/data/storeCategories.ts — pajamas, underwear, bridal, home,
+// kitchen and baby) to a LOCAL emulator database. Same result
 // as the admin's "Add store categories" button on /admin/categories.
 //
 // Idempotent: a category whose slug already exists is skipped (doc id =

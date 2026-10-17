@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Signing in…</title>
+<script>
+  // Google redirects here with the ID token in the URL fragment; hand it to
+  // the window that opened the popup (src/db/auth.ts) and close.
+  if (window.opener) window.opener.postMessage({ type: "google-signin", hash: location.hash }, location.origin);
+  window.close();
+</script>

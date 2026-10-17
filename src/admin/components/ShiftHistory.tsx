@@ -1,4 +1,4 @@
-import { where } from "firebase/firestore";
+import { where } from "../../db/firestore";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useLanguage } from "../../context/LanguageContext";

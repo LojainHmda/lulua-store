@@ -1,4 +1,4 @@
-import { doc, increment, limit, serverTimestamp, updateDoc, where } from "firebase/firestore";
+import { doc, increment, limit, serverTimestamp, updateDoc, where } from "../db/firestore";
 import { discountsApi } from "./collections";
 import { db } from "./config";
 import type { AdminDiscount } from "../admin/types";

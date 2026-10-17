@@ -1,6 +1,6 @@
-import { assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import { doc, getDoc, runTransaction, setDoc } from "firebase/firestore";
-import type { Firestore } from "firebase/firestore";
+import { assertFails, assertSucceeds } from "./testing";
+import { doc, getDoc, runTransaction, setDoc } from "../../src/db/firestore";
+import type { Firestore } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { allLinesPrepared, deriveStatusAfterPreparationChange, setLinePrepared } from "../../src/admin/orderPreparation";
 import type { AdminOrder, OrderLine } from "../../src/admin/types";

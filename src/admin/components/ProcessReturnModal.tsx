@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { where } from "firebase/firestore";
+import { where } from "../../db/firestore";
 import { Modal } from "./Modal";
 import { AdminButton, AdminSelect, AdminTextarea, Field } from "./ui";
 import { useToast } from "./ToastContext";

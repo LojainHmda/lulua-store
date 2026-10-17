@@ -1,6 +1,6 @@
-import { assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import { collection, doc, getDoc, getDocs, query, runTransaction, setDoc, updateDoc, where } from "firebase/firestore";
-import type { Firestore } from "firebase/firestore";
+import { assertFails, assertSucceeds } from "./testing";
+import { collection, doc, getDoc, getDocs, query, runTransaction, setDoc, updateDoc, where } from "../../src/db/firestore";
+import type { Firestore } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { computeStockDeltas } from "../../src/admin/stockMovements";
 import { clearFirestore, getTestEnv, teardownTestEnv } from "./setup";

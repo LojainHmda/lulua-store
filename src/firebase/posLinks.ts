@@ -1,5 +1,5 @@
-import { signInAnonymously } from "firebase/auth";
-import { collection, doc, getDoc, getDocs, onSnapshot, query, serverTimestamp, setDoc, where, writeBatch } from "firebase/firestore";
+import { signInAnonymously } from "../db/auth";
+import { collection, doc, getDoc, getDocs, onSnapshot, query, serverTimestamp, setDoc, where, writeBatch } from "../db/firestore";
 import type { Branch, Register } from "../admin/types";
 import { auth } from "./auth";
 import { db } from "./config";

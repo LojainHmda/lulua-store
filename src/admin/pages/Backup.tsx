@@ -1,4 +1,4 @@
-import { collection, doc, getDocs, writeBatch } from "firebase/firestore";
+import { collection, doc, getDocs, writeBatch } from "../../db/firestore";
 import { useRef, useState } from "react";
 import { db } from "../../firebase/config";
 import { useLanguage } from "../../context/LanguageContext";

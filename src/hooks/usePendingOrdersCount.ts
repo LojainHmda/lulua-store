@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { where } from "firebase/firestore";
+import { where } from "../db/firestore";
 import { ordersApi } from "../firebase/collections";
 import { countPendingOrders, PENDING_ORDER_STATUSES } from "../admin/orderStatusCounts";
 import type { AdminOrder } from "../admin/types";

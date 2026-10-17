@@ -1,4 +1,4 @@
-import { orderBy, limit as fsLimit } from "firebase/firestore";
+import { orderBy, limit as fsLimit } from "../../db/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { categoriesApi, customersApi, ordersApi, productsApi } from "../../firebase/collections";
 import { buildCategoryLookup, buildProductLookup } from "../../components/admin/orderSearch";

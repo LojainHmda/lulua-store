@@ -1,4 +1,4 @@
-import { documentId, limit, orderBy, startAfter, Timestamp, where, type QueryConstraint } from "firebase/firestore";
+import { documentId, limit, orderBy, startAfter, Timestamp, where, type QueryConstraint } from "../db/firestore";
 import type { AdminColorVariant, AdminProduct, OrderLine, StockMovement, StockMovementReason, StockMovementSource } from "./types";
 
 export interface StockDelta {

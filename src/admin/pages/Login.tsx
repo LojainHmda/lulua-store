@@ -15,10 +15,6 @@ function friendlyAuthError(code: string, t: (key: string) => string): string {
     case "auth/wrong-password":
     case "auth/user-not-found":
       return t("admin.login.errBadCredential");
-    case "auth/email-already-in-use":
-      return t("admin.login.errEmailInUse");
-    case "auth/weak-password":
-      return t("admin.login.errWeakPassword");
     case "auth/too-many-requests":
       return t("admin.login.errTooMany");
     default:
@@ -26,13 +22,13 @@ function friendlyAuthError(code: string, t: (key: string) => string): string {
   }
 }
 
+// Sign-in only: staff accounts are created by the owner (Team page), never
+// from this screen.
 export default function Login() {
-  const { bootstrapNeeded, signIn, bootstrapOwner } = useAdminAuth();
+  const { signIn } = useAdminAuth();
   const { dir, t } = useLanguage();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [displayName, setDisplayName] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -40,25 +36,9 @@ export default function Login() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
-
-    if (bootstrapNeeded) {
-      if (password !== confirmPassword) {
-        setError(t("admin.login.errPasswordMismatch"));
-        return;
-      }
-      if (!displayName.trim()) {
-        setError(t("admin.login.errNameRequired"));
-        return;
-      }
-    }
-
     setLoading(true);
     try {
-      if (bootstrapNeeded) {
-        await bootstrapOwner(email.trim(), password, displayName.trim());
-      } else {
-        await signIn(email.trim(), password);
-      }
+      await signIn(email.trim(), password);
     } catch (err) {
       const code = (err as { code?: string }).code ?? "";
       setError(friendlyAuthError(code, t));
@@ -76,26 +56,18 @@ export default function Login() {
             <AdminIcon name="shield" className="h-6 w-6" />
           </div>
           <h1 className="font-display text-2xl font-bold text-ink">{t("admin.brand")}</h1>
-          <p className="mt-1 text-sm text-ink-soft">
-            {bootstrapNeeded ? t("admin.login.bootstrapSubtitle") : t("admin.login.subtitle")}
-          </p>
+          <p className="mt-1 text-sm text-ink-soft">{t("admin.login.subtitle")}</p>
         </div>
 
         <form onSubmit={handleSubmit} className="rounded-2xl border border-line bg-paper p-6 shadow-card">
           <div className="flex flex-col gap-4">
-            {bootstrapNeeded && (
-              <Field label={t("admin.login.yourName")} required>
-                <AdminInput value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={t("admin.login.yourNamePlaceholder")} autoFocus />
-              </Field>
-            )}
-
             <Field label={t("admin.login.email")} required>
               <AdminInput
                 type="text"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@lulua.com"
-                autoFocus={!bootstrapNeeded}
+                autoFocus
                 autoComplete="username"
               />
             </Field>
@@ -107,7 +79,7 @@ export default function Login() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  autoComplete={bootstrapNeeded ? "new-password" : "current-password"}
+                  autoComplete="current-password"
                   className="pe-10"
                 />
                 <button
@@ -121,33 +93,15 @@ export default function Login() {
               </div>
             </Field>
 
-            {bootstrapNeeded && (
-              <Field label={t("admin.login.confirmPassword")} required>
-                <AdminInput
-                  type={showPassword ? "text" : "password"}
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="••••••••"
-                  autoComplete="new-password"
-                />
-              </Field>
-            )}
-
             {error && (
               <p className="rounded-lg bg-wine-light px-3.5 py-2.5 text-sm font-semibold text-wine">{error}</p>
             )}
 
             <AdminButton type="submit" variant="primary" loading={loading} className="mt-1 w-full justify-center py-3">
-              {bootstrapNeeded ? t("admin.login.createAccount") : t("admin.login.signIn")}
+              {t("admin.login.signIn")}
             </AdminButton>
           </div>
         </form>
-
-        {bootstrapNeeded && (
-          <p className="mt-4 text-center text-xs text-ink-faint">
-            {t("admin.login.bootstrapNote")}
-          </p>
-        )}
       </div>
     </div>
   );

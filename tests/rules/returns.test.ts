@@ -1,6 +1,6 @@
-import { assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import type { RulesTestContext } from "@firebase/rules-unit-testing";
-import { deleteDoc, doc, getDoc, runTransaction, setDoc, updateDoc } from "firebase/firestore";
+import { assertFails, assertSucceeds } from "./testing";
+import type { RulesTestContext } from "./testing";
+import { deleteDoc, doc, getDoc, runTransaction, setDoc, updateDoc } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, it } from "vitest";
 import { clearFirestore, getTestEnv, teardownTestEnv } from "./setup";
 

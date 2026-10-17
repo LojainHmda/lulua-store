@@ -1,4 +1,4 @@
-import { collection, doc, onSnapshot, query, runTransaction, serverTimestamp, where } from "firebase/firestore";
+import { collection, doc, onSnapshot, query, runTransaction, serverTimestamp, where } from "../db/firestore";
 import type { Actor } from "../admin/actor";
 import { stockCellKey } from "../admin/productVariants";
 import type { AdminProduct, BranchStockDoc } from "../admin/types";

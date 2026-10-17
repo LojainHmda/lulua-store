@@ -1,4 +1,4 @@
-import { doc, onSnapshot } from "firebase/firestore";
+import { doc, onSnapshot } from "../db/firestore";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import AccountShell from "../components/account/AccountShell";
@@ -7,7 +7,7 @@ import { StoreModal } from "../components/ui/InfoModals";
 import ProductPhoto from "../components/ui/ProductPhoto";
 import { useCustomerAuth } from "../context/CustomerAuthContext";
 import { useLanguage, type Lang } from "../context/LanguageContext";
-import { db, isFirebaseConfigured } from "../firebase/config";
+import { db, isBackendConfigured } from "../firebase/config";
 import type { AdminOrder, OrderStatus } from "../admin/types";
 import { ReceiptPreview, orderToReceiptData } from "../receipts/ReceiptPreview";
 import { formatPrice } from "../utils/currency";
@@ -37,7 +37,7 @@ export default function AccountOrderDetail() {
   const [receiptOpen, setReceiptOpen] = useState(false);
 
   useEffect(() => {
-    if (!isFirebaseConfigured || !firebaseUser || !id) {
+    if (!isBackendConfigured || !firebaseUser || !id) {
       setOrder(null);
       return;
     }

@@ -1,4 +1,4 @@
-import { orderBy, Timestamp, where } from "firebase/firestore";
+import { orderBy, Timestamp, where } from "../db/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { PageLoading } from "../admin/components/ui";
 import type { AdminOrder, RegisterSession } from "../admin/types";

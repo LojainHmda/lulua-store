@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { where } from "firebase/firestore";
+import { where } from "../../db/firestore";
 import { ordersApi } from "../../firebase/collections";
 import { useLanguage } from "../../context/LanguageContext";
 import AdminIcon from "./AdminIcons";

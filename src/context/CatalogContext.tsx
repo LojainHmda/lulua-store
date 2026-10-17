@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { db, isFirebaseConfigured } from "../firebase/config";
-import { collection, onSnapshot, query, where } from "firebase/firestore";
+import { db, isBackendConfigured } from "../firebase/config";
+import { collection, onSnapshot, query, where } from "../db/firestore";
 import { childrenOf, visibleCategories } from "../data/categoryTree";
 import { CATEGORIES, PRODUCTS } from "../data/products";
 import { filterSellable } from "../data/sellability";
@@ -96,10 +96,10 @@ function toStoreCategory(id: string, data: Record<string, unknown>): Category {
 export function CatalogProvider({ children }: { children: ReactNode }) {
   const [liveProducts, setLiveProducts] = useState<Product[] | null>(null);
   const [liveCategories, setLiveCategories] = useState<Category[] | null>(null);
-  const [productsLoaded, setProductsLoaded] = useState(!isFirebaseConfigured);
+  const [productsLoaded, setProductsLoaded] = useState(!isBackendConfigured);
 
   useEffect(() => {
-    if (!isFirebaseConfigured) return;
+    if (!isBackendConfigured) return;
 
     const productsQuery = query(collection(db, "products"), where("status", "==", "active"));
     const unsubProducts = onSnapshot(

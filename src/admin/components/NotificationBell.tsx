@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { orderBy, limit } from "firebase/firestore";
+import { orderBy, limit } from "../../db/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { notificationsApi } from "../../firebase/collections";

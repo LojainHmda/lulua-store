@@ -1,4 +1,4 @@
-import { where } from "firebase/firestore";
+import { where } from "../../db/firestore";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adminsApi, branchesApi, registersApi, registerSessionsApi } from "../../firebase/collections";
 import { useLanguage } from "../../context/LanguageContext";

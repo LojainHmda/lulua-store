@@ -1,4 +1,4 @@
-import { collection, onSnapshot, query, where } from "firebase/firestore";
+import { collection, onSnapshot, query, where } from "../db/firestore";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAdminAuth } from "../admin/AdminAuthContext";
 import AdminIcon from "../admin/components/AdminIcons";
@@ -18,7 +18,8 @@ import { MAX_CHECKOUT_LINES, placeOrder, PlaceOrderError } from "../firebase/ord
 import { posStoreLine, ReceiptPreview } from "../receipts/ReceiptPreview";
 import type { ReceiptData } from "../receipts/renderReceipt";
 import { CameraScannerModal } from "./CameraScannerModal";
-import { CategoryRail, useSubtreeCounts } from "./CategoryBrowser";
+import { CategoryRail, tintStyle, useCategoryColors, useSubtreeCounts } from "./CategoryBrowser";
+import { resolveCategoryIcon } from "../components/ui/CategoryIcons";
 import { ProductPicker, type PickedLine } from "./ProductPicker";
 import { useBarcodeScanner } from "./useBarcodeScanner";
 import { formatPrice } from "../utils/currency";
@@ -180,6 +181,8 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
     return m;
   }, [listedProducts]);
   const subtreeCounts = useSubtreeCounts(tillCategories, categoryCounts);
+  const categoryColors = useCategoryColors(tillCategories);
+  const categoryBySlug = useMemo(() => new Map(tillCategories.map((c) => [c.slug, c])), [tillCategories]);
 
   // Category + search first; the stock filter (branch tills only) is applied
   // on top, so each filter chip can show how many products it would list.
@@ -452,8 +455,20 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
                 className={`flex flex-col gap-1 rounded-xl border border-line bg-paper p-1.5 text-start transition-[border-color,box-shadow,transform] hover:border-wine hover:shadow-soft active:scale-[0.98] ${outHere ? "opacity-50" : ""}`}
               >
                 <div className="relative aspect-square overflow-hidden rounded-lg bg-cream-dim">
-                  {resolveImageSrc(p.colorVariants[0] ?? {}) && (
+                  {resolveImageSrc(p.colorVariants[0] ?? {}) ? (
                     <img src={resolveImageSrc(p.colorVariants[0] ?? {})} alt={localizedName(p.name, p.nameAr, lang)} className="h-full w-full object-cover" />
+                  ) : (
+                    // No photo: the product's category icon, in that category's color.
+                    (() => {
+                      const Icon = resolveCategoryIcon(categoryBySlug.get(p.category)?.icon);
+                      return (
+                        <div className="flex h-full w-full items-center justify-center">
+                          <span className="flex h-14 w-14 items-center justify-center rounded-2xl" style={tintStyle(categoryColors.get(p.category) ?? "#a855f7")}>
+                            <Icon className="h-8 w-8" />
+                          </span>
+                        </div>
+                      );
+                    })()
                   )}
                   {/* Only flag what needs attention: low or none left here. */}
                   {branchId && here <= 3 && (
@@ -555,55 +570,35 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
               {cart.map((l) => {
                 const available = stockFor(l.productId, l.variantId, l.size);
                 const atMax = available !== null && l.qty >= available;
-                const stepper = (
-                      <div className={`flex shrink-0 items-center gap-1.5 ${wideRows ? "" : "mt-1.5"}`}>
-                        <button
-                          disabled={paying}
-                          onClick={() => changeQty(l.key, -1)}
-                          aria-label={t("pos.terminal.decreaseQty")}
-                          className="flex h-7 w-7 items-center justify-center rounded-full border border-line text-sm font-bold leading-none text-ink hover:bg-cream-dim disabled:opacity-40"
-                        >
+                const stepBtn = "flex h-7 w-7 items-center justify-center text-sm font-bold leading-none text-ink hover:bg-cream-dim disabled:opacity-40";
+                // Compact row: name, unit price and color/size tag | stepper |
+                // line total. "−" at 1 removes the line.
+                return (
+                  <li key={l.key} className="flex items-center gap-3 py-2.5">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-bold text-ink">{l.name}</p>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                        <span className="text-xs text-ink-faint">
+                          {formatPrice(l.price)} / {t("pos.terminal.perPiece")}
+                        </span>
+                        <span className="rounded-full bg-wine-light px-2 py-0.5 text-[10px] font-semibold leading-none text-wine">
+                          {[l.color, l.size].filter(Boolean).join(" · ")}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-center">
+                      <div dir="ltr" className="flex items-center overflow-hidden rounded-md border border-line bg-paper">
+                        <button disabled={paying} onClick={() => changeQty(l.key, -1)} aria-label={t("pos.terminal.decreaseQty")} className={stepBtn}>
                           −
                         </button>
-                        <span className="w-7 text-center text-sm font-semibold text-ink">{l.qty}</span>
-                        <button
-                          disabled={paying || atMax}
-                          onClick={() => changeQty(l.key, 1)}
-                          aria-label={t("pos.terminal.increaseQty")}
-                          className="flex h-7 w-7 items-center justify-center rounded-full border border-line text-sm font-bold leading-none text-ink hover:bg-cream-dim disabled:opacity-40"
-                        >
+                        <span className="flex h-7 w-8 items-center justify-center border-x border-line text-sm font-semibold text-ink">{l.qty}</span>
+                        <button disabled={paying || atMax} onClick={() => changeQty(l.key, 1)} aria-label={t("pos.terminal.increaseQty")} className={stepBtn}>
                           +
                         </button>
-                        <span className={`w-7 text-[11px] font-semibold text-wine ${atMax ? "" : "invisible"}`}>{t("pos.branch.maxStock")}</span>
                       </div>
-                );
-                return (
-                  <li key={l.key} className="flex items-center justify-between gap-2.5 py-2.5">
-                    {/* The picked color's own photo, so the cashier can match
-                        each line to the garment in hand at a glance. */}
-                    <div className={`shrink-0 self-start overflow-hidden rounded-md bg-cream-dim ${saleFull ? "h-14 w-14" : saleExpanded ? "h-11 w-11" : "h-10 w-10"}`}>
-                      {resolveImageSrc(l, 120) && <img src={resolveImageSrc(l, 120)} alt="" loading="lazy" className="h-full w-full object-cover" />}
+                      {atMax && <span className="mt-0.5 text-[10px] font-semibold text-wine">{t("pos.branch.maxStock")}</span>}
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-semibold text-ink">{l.name}</p>
-                      <p className="text-xs text-ink-faint">
-                        {l.color} · {l.size} · {formatPrice(l.price)}
-                      </p>
-                      {!wideRows && stepper}
-                    </div>
-                    {wideRows && stepper}
-                    <div className="flex items-center gap-2">
-                      <span className={`text-end text-sm font-semibold text-ink ${wideRows ? "w-24" : ""}`}>{formatPrice(l.price * l.qty)}</span>
-                      {!paying && (
-                        <button
-                          onClick={() => setCart((prev) => prev.filter((x) => x.key !== l.key))}
-                          aria-label={t("pos.terminal.removeLine")}
-                          className="flex h-8 w-8 items-center justify-center rounded-full text-ink-faint hover:bg-cream-dim hover:text-wine"
-                        >
-                          ×
-                        </button>
-                      )}
-                    </div>
+                    <span className={`shrink-0 text-end text-sm font-bold text-ink ${wideRows ? "w-24" : "w-20"}`}>{formatPrice(l.price * l.qty)}</span>
                   </li>
                 );
               })}

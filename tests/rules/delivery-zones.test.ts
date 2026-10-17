@@ -1,5 +1,5 @@
-import { assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import { collection, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from "firebase/firestore";
+import { assertFails, assertSucceeds } from "./testing";
+import { collection, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, it } from "vitest";
 import { clearFirestore, getTestEnv, teardownTestEnv } from "./setup";
 
@@ -221,7 +221,7 @@ describe("deliveryZones: write access", () => {
     await seedAdmin("admin1", "admin");
     await seedAdmin("editor1", "editor");
     const env = await getTestEnv();
-    const { deleteDoc } = await import("firebase/firestore");
+    const { deleteDoc } = await import("../../src/db/firestore");
     await assertFails(deleteDoc(doc(env.authenticatedContext("owner1", IDENTIFIED).firestore(), "deliveryZones/z1")));
     await assertFails(deleteDoc(doc(env.authenticatedContext("admin1", IDENTIFIED).firestore(), "deliveryZones/z2")));
     await assertFails(deleteDoc(doc(env.authenticatedContext("editor1", IDENTIFIED).firestore(), "deliveryZones/z3")));
@@ -232,7 +232,7 @@ describe("deliveryZones: write access", () => {
     await seedAdmin("viewer1", "viewer");
     await seedAdmin("cashier1", "cashier");
     const env = await getTestEnv();
-    const { deleteDoc } = await import("firebase/firestore");
+    const { deleteDoc } = await import("../../src/db/firestore");
     await assertFails(deleteDoc(doc(env.authenticatedContext("viewer1", IDENTIFIED).firestore(), "deliveryZones/z1")));
     await assertFails(deleteDoc(doc(env.authenticatedContext("cashier1", IDENTIFIED).firestore(), "deliveryZones/z1")));
     await assertFails(deleteDoc(doc(env.authenticatedContext("mallory", IDENTIFIED).firestore(), "deliveryZones/z1")));

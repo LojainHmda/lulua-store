@@ -1,5 +1,5 @@
 import { Navigate, Route, Routes } from "react-router-dom";
-import { isFirebaseConfigured } from "../firebase/config";
+import { isBackendConfigured } from "../firebase/config";
 import { useUiRootFontSize } from "../hooks/useUiRootFontSize";
 import { useLanguage } from "../context/LanguageContext";
 import { AdminAuthProvider, useAdminAuth } from "./AdminAuthContext";
@@ -364,7 +364,7 @@ function AdminRoutes() {
 
 export default function AdminApp() {
   useUiRootFontSize();
-  if (!isFirebaseConfigured) return <FirebaseSetupNeeded />;
+  if (!isBackendConfigured) return <FirebaseSetupNeeded />;
 
   return (
     <AdminAuthProvider>

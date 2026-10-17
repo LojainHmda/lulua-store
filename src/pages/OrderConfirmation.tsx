@@ -1,11 +1,11 @@
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc } from "../db/firestore";
 import { useEffect, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { StoreModal } from "../components/ui/InfoModals";
 import LinkButton from "../components/ui/LinkButton";
 import { useCustomerAuth } from "../context/CustomerAuthContext";
 import { useLanguage } from "../context/LanguageContext";
-import { db, isFirebaseConfigured } from "../firebase/config";
+import { db, isBackendConfigured } from "../firebase/config";
 import type { AdminOrder } from "../admin/types";
 import { ReceiptPreview, orderToReceiptData } from "../receipts/ReceiptPreview";
 
@@ -36,7 +36,7 @@ export default function OrderConfirmation() {
   const canFetchOrder = Boolean(orderId && firebaseUser && !firebaseUser.isAnonymous);
 
   useEffect(() => {
-    if (!isFirebaseConfigured || !canFetchOrder) return;
+    if (!isBackendConfigured || !canFetchOrder) return;
     let cancelled = false;
     getDoc(doc(db, "orders", orderId!)).then((snap) => {
       if (cancelled || !snap.exists()) return;

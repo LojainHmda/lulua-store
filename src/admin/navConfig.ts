@@ -30,7 +30,6 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "admin.nav.groupPos",
     items: [
-      { labelKey: "admin.nav.pos", path: "/pos", icon: "grid", minRole: OPS },
       // Sales, shifts (opening/closing cash, reconciliation) and per-register/cashier filters.
       { labelKey: "admin.nav.posSales", path: "/admin/pos-sales", icon: "chart", minRole: OPS },
       // Branches, registers, POS links and register status/history.
@@ -48,7 +47,8 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "admin.nav.groupInventory",
     items: [
-      { labelKey: "admin.nav.inventory", path: "/admin/inventory", icon: "box", minRole: CONTENT },
+      // Online-store stock (/admin/inventory) is hidden from the menu: stock
+      // is managed per branch. The route still works by URL.
       { labelKey: "admin.nav.branchStock", path: "/admin/branch-stock", icon: "box", minRole: ALL },
       { labelKey: "admin.nav.stockLedger", path: "/admin/stock-ledger", icon: "refresh", minRole: ALL },
     ],

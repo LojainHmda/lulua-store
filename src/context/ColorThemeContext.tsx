@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { DEFAULT_COLOR_THEME, getColorTheme, getLogoFilter } from "../data/colorThemes";
 import { subscribeSingletonDoc } from "../firebase/firestore";
-import { isFirebaseConfigured } from "../firebase/config";
+import { isBackendConfigured } from "../firebase/config";
 import { useTheme } from "./ThemeContext";
 
 interface AppearanceSettingsSlice {
@@ -31,7 +31,7 @@ export function ColorThemeProvider({ children }: { children: ReactNode }) {
   const [logoFilter, setLogoFilter] = useState("none");
 
   useEffect(() => {
-    if (!isFirebaseConfigured) return;
+    if (!isBackendConfigured) return;
     return subscribeSingletonDoc<AppearanceSettingsSlice>("settings", "appearance", (doc) => {
       setColorTheme(doc?.colorTheme ?? DEFAULT_COLOR_THEME);
       setCustomColor(doc?.customColor);

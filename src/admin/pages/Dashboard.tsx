@@ -1,4 +1,4 @@
-import { collection, getCountFromServer, orderBy, limit, query, where } from "firebase/firestore";
+import { collection, getCountFromServer, orderBy, limit, query, where } from "../../db/firestore";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { db } from "../../firebase/config";

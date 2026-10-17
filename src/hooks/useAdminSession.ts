@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { onAuthStateChanged } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { onAuthStateChanged } from "../db/auth";
+import { doc, getDoc } from "../db/firestore";
 import { auth } from "../firebase/auth";
-import { db, isFirebaseConfigured } from "../firebase/config";
+import { db, isBackendConfigured } from "../firebase/config";
 
 export interface AdminSessionInfo {
   uid: string;
@@ -23,7 +23,7 @@ export function useAdminSession(): AdminSessionInfo | null {
   const [session, setSession] = useState<AdminSessionInfo | null>(null);
 
   useEffect(() => {
-    if (!isFirebaseConfigured) return;
+    if (!isBackendConfigured) return;
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user || user.isAnonymous) {
         setSession(null);

@@ -1,85 +1,81 @@
-// `npm run dev`: start the local Firebase emulators (the app's database,
-// auth and storage — see firebase.lulua.json / .env.local), wait until
-// they're accepting connections, then start Vite. If the emulators are
-// already running (e.g. from another terminal), they're reused.
+// `npm run dev`: start the Lulua API (services/api) against the Neon
+// database in .env.local (DATABASE_URL), wait until it answers, then start
+// Vite pointed at it (VITE_API_URL). Ctrl+C stops both.
 //
-// Ctrl+C stops both. The emulators receive Ctrl+C directly from the
-// terminal, so `--export-on-exit` still saves data back to ./emulator-data.
+// .env.local:
+//   DATABASE_URL=postgresql://...neon.tech/...   (Neon connection string)
+//   VITE_API_URL=http://localhost:8787
+// Without DATABASE_URL the API uses a local in-memory Postgres (empty data).
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import net from "node:net";
-import { saveData } from "./save-data.mjs";
 
-const config = JSON.parse(readFileSync(new URL("../firebase.lulua.json", import.meta.url), "utf8"));
-const ports = [config.emulators.firestore.port, config.emulators.auth.port, config.emulators.storage.port];
-// Importing a large emulator-data export can take a few minutes.
-const TIMEOUT_MS = 600_000;
-// Autosave: the emulators' own --export-on-exit is unreliable on Windows
-// (see save-data.mjs), so save every few minutes while running.
-const AUTOSAVE_MS = 5 * 60_000;
+const root = new URL("..", import.meta.url);
+const envFile = new URL(".env.local", root);
+const env = existsSync(envFile)
+  ? Object.fromEntries(
+      readFileSync(envFile, "utf8")
+        .split(/\r?\n/)
+        .map((l) => l.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/))
+        .filter(Boolean)
+        .map((m) => [m[1], m[2]])
+    )
+  : {};
 
-function isListening(port) {
-  return new Promise((resolve) => {
-    const socket = net.connect({ host: "127.0.0.1", port });
-    socket.once("connect", () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once("error", () => resolve(false));
+const PORT = 8787;
+const apiUrl = env.VITE_API_URL || `http://localhost:${PORT}`;
+if (!env.DATABASE_URL) console.warn("[dev] DATABASE_URL not set in .env.local — using an empty in-memory database.");
+
+const healthy = () =>
+  fetch(`http://localhost:${PORT}/healthz`).then(
+    (r) => r.ok,
+    () => false
+  );
+const portBusy = (port) =>
+  new Promise((resolve) => {
+    const s = net.connect({ host: "127.0.0.1", port });
+    s.once("connect", () => (s.destroy(), resolve(true)));
+    s.once("error", () => resolve(false));
   });
-}
-
-async function allListening() {
-  const results = await Promise.all(ports.map(isListening));
-  return results.every(Boolean);
-}
-
-function run(script) {
-  return spawn("npm", ["run", script], { stdio: "inherit", shell: true });
-}
 
 const children = [];
-
-if (await allListening()) {
-  console.log("[dev] Firebase emulators already running — reusing them.");
+if (await healthy()) {
+  console.log(`[dev] An API is already running on :${PORT} — reusing it.`);
 } else {
-  // Some ports taken but not all: a leftover emulator from a run that
-  // didn't shut down cleanly. Starting another one would just fail.
-  const busy = [];
-  for (const p of ports) if (await isListening(p)) busy.push(p);
-  if (busy.length) {
-    console.error(`[dev] Port(s) ${busy.join(", ")} still held by an old emulator. Stop it first, e.g. in PowerShell:`);
-    console.error(`      Get-NetTCPConnection -LocalPort ${busy[0]} -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`);
-    console.error("      then run `npm run dev` again.");
+  if (await portBusy(PORT)) {
+    console.error(`[dev] Port ${PORT} is taken by something that isn't the API. Stop it first (PowerShell):`);
+    console.error(`      Get-NetTCPConnection -LocalPort ${PORT} -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }`);
     process.exit(1);
   }
-  console.log("[dev] Starting Firebase emulators…");
-  const emulators = run("emulators");
-  children.push(emulators);
-
+  const api = spawn("node", ["--watch", "src/server.ts"], {
+    cwd: new URL("services/api", root),
+    stdio: "inherit",
+    shell: true,
+    env: { ...process.env, ...env, PORT: String(PORT) },
+  });
+  children.push(api);
   const started = Date.now();
-  while (!(await allListening())) {
-    if (Date.now() - started > TIMEOUT_MS) {
-      console.error("[dev] Emulators did not start within 10 minutes. Is Java installed and the ports free?");
+  while (!(await healthy())) {
+    if (Date.now() - started > 60_000) {
+      console.error("[dev] API did not start within 60s (see the error above).");
       process.exit(1);
     }
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 500));
   }
-  console.log(`[dev] Emulators ready (UI: http://127.0.0.1:${config.emulators.ui.port}).`);
 }
+console.log(`[dev] API ready on ${apiUrl}`);
 
-children.push(run("dev:web"));
+if (await portBusy(5176)) {
+  console.error("[dev] Port 5176 is taken — another `npm run dev` is probably still running. Stop it first (PowerShell):");
+  console.error("      Get-NetTCPConnection -LocalPort 5176 -State Listen | % { Stop-Process -Id $_.OwningProcess -Force }");
+  process.exit(1);
+}
+children.push(spawn("npm", ["run", "dev:web"], { stdio: "inherit", shell: true, env: { ...process.env, VITE_API_URL: apiUrl } }));
 
-setInterval(() => saveData({ quiet: true }), AUTOSAVE_MS);
-
-// Exit only once every child is done, so the emulators finish exporting.
 let remaining = children.length;
 for (const child of children) {
   child.on("exit", () => {
     if (--remaining === 0) process.exit(0);
   });
 }
-
-// Let children handle Ctrl+C themselves (they share the terminal), and
-// just keep this process alive until they've finished shutting down.
 process.on("SIGINT", () => {});

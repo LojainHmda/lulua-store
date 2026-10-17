@@ -1,6 +1,6 @@
-import { assertFails, assertSucceeds } from "@firebase/rules-unit-testing";
-import { doc, getDoc, runTransaction, setDoc, updateDoc } from "firebase/firestore";
-import type { Firestore } from "firebase/firestore";
+import { assertFails, assertSucceeds } from "./testing";
+import { doc, getDoc, runTransaction, setDoc, updateDoc } from "../../src/db/firestore";
+import type { Firestore } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, it } from "vitest";
 import { clearFirestore, getTestEnv, teardownTestEnv } from "./setup";
 import { seedBranchSetup } from "./branchFixtures";
@@ -1180,7 +1180,7 @@ describe("checkout: order non-delivery flag", () => {
   });
 
   it("owner/admin can query orders by nonDeliveryFlagged == true (the New Order lookup's exact query)", async () => {
-    const { query, where, getDocs, collection } = await import("firebase/firestore");
+    const { query, where, getDocs, collection } = await import("../../src/db/firestore");
     await seedAdmin("admin10", "admin");
     const env = await getTestEnv();
     await env.withSecurityRulesDisabled(async (ctx) => {

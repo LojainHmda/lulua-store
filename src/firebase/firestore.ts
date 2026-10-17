@@ -10,9 +10,9 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
-} from "firebase/firestore";
-import type { QueryConstraint } from "firebase/firestore";
-import { db, isFirebaseConfigured } from "./config";
+} from "../db/firestore";
+import type { QueryConstraint } from "../db/firestore";
+import { db, isBackendConfigured } from "./config";
 
 export function createCollectionApi<T extends { id: string }>(collectionName: string) {
   const colRef = () => collection(db, collectionName);
@@ -88,23 +88,23 @@ export function createCollectionApi<T extends { id: string }>(collectionName: st
 // go through createCollectionApi().create(), which also stamps an updatedAt
 // field the rule rejects.
 export async function addNewsletterSubscriber(email: string): Promise<void> {
-  if (!isFirebaseConfigured) return;
+  if (!isBackendConfigured) return;
   await addDoc(collection(db, "newsletterSubscribers"), { email, createdAt: serverTimestamp() });
 }
 
 export async function getSingletonDoc<T>(path: string, id: string): Promise<T | undefined> {
-  if (!isFirebaseConfigured) return undefined;
+  if (!isBackendConfigured) return undefined;
   const snap = await getDoc(doc(db, path, id));
   return snap.exists() ? (snap.data() as T) : undefined;
 }
 
 export async function setSingletonDoc<T extends object>(path: string, id: string, data: T): Promise<void> {
-  if (!isFirebaseConfigured) return;
+  if (!isBackendConfigured) return;
   await setDoc(doc(db, path, id), { ...data, updatedAt: serverTimestamp() }, { merge: true });
 }
 
 export function subscribeSingletonDoc<T>(path: string, id: string, onData: (data: T | undefined) => void) {
-  if (!isFirebaseConfigured) return () => {};
+  if (!isBackendConfigured) return () => {};
   return onSnapshot(doc(db, path, id), (snap) => {
     onData(snap.exists() ? (snap.data() as T) : undefined);
   });
