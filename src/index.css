@@ -79,15 +79,17 @@
   }
 }
 
-/* ---- Dark theme — hand-tuned, not an inversion ---- */
+/* ---- Dark theme — hand-tuned, not an inversion ----
+   Neutral black/grey (no warm/brown cast): page near-black, cards one step
+   lighter, text off-white. Only the accent colours keep their hue. */
 .dark {
-  --color-cream: #17140f;
-  --color-cream-dim: #201c16;
-  --color-paper: #241f18;
-  --color-ink: #f1ece1;
-  --color-ink-soft: #b6ac9c;
-  --color-ink-faint: #7c7365;
-  --color-line: #373126;
+  --color-cream: #0a0a0a;
+  --color-cream-dim: #141414;
+  --color-paper: #171717;
+  --color-ink: #f5f5f5;
+  --color-ink-soft: #a3a3a3;
+  --color-ink-faint: #737373;
+  --color-line: #2a2a2a;
 
   --color-wine: #a8425f;
   --color-wine-dark: #c96385;
@@ -95,12 +97,12 @@
   --color-on-accent: #fdf8f6;
 
   --color-olive: #a2ab7d;
-  --color-olive-light: #23241a;
+  --color-olive-light: #1c1f17;
 
-  --color-sand: #2c2519;
-  --color-sand-dark: #453a26;
-  --color-stone: #2a2621;
-  --color-stone-dark: #4d473c;
+  --color-sand: #222222;
+  --color-sand-dark: #3a3a3a;
+  --color-stone: #1f1f1f;
+  --color-stone-dark: #404040;
 
   --shadow-soft: 0 2px 10px rgba(0, 0, 0, 0.35);
   --shadow-card: 0 10px 30px -14px rgba(0, 0, 0, 0.55);

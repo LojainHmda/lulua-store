@@ -1,4 +1,5 @@
 import { createCollectionApi } from "./firestore";
+import type { BranchDaySnapshot } from "../admin/daySnapshot";
 import type {
   AdminCategory,
   AdminCustomer,
@@ -22,6 +23,9 @@ import type {
   ProductViewDailyDoc,
   RegisterSession,
   AdminReturn,
+  PosReturn,
+  PosSyncIssue,
+  AdminPromotion,
   StockMovement,
 } from "../admin/types";
 
@@ -44,6 +48,18 @@ export const registerSessionsApi = createCollectionApi<RegisterSession>("registe
 // recordCashWithdrawal()'s transaction, and immutable per firestore.rules.
 export const cashMovementsApi = createCollectionApi<CashMovement>("cashMovements");
 export const returnsApi = createCollectionApi<AdminReturn>("returns");
+// In-store returns. Read-only here: written only by processPosReturn()'s
+// transaction (firebase/posReturn.ts), immutable per the rules.
+export const posReturnsApi = createCollectionApi<PosReturn>("posReturns");
+// Automatic promotions (Admin → Discounts → Promotions); owner/admin write.
+export const promotionsApi = createCollectionApi<AdminPromotion>("promotions");
+// Offline till sales the server refused (Feature 5). Written by the till;
+// admins resolve them with a raw updateDoc (the rules allow only the
+// resolve fields, so the wrapper's updatedAt stamp would be refused).
+export const posSyncIssuesApi = createCollectionApi<PosSyncIssue>("posSyncIssues");
+// End-of-day snapshots (Admin → Branches → End of day). Written with a raw
+// setDoc by BranchDay.tsx (the rules check closedAt/version exactly).
+export const branchDaySnapshotsApi = createCollectionApi<BranchDaySnapshot>("branchDaySnapshots");
 // Read-only by convention: the .create() this exposes stamps an `updatedAt`
 // field that a genuinely immutable ledger shouldn't have (see StockMovement's
 // own doc comment) and firestore.rules rejects .update()/.remove() outright

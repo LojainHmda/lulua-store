@@ -32,8 +32,19 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       // Sales, shifts (opening/closing cash, reconciliation) and per-register/cashier filters.
       { labelKey: "admin.nav.posSales", path: "/admin/pos-sales", icon: "chart", minRole: OPS },
+      // Manual discounts at the till: the cashier limit and every discount given.
+      { labelKey: "admin.nav.posDiscounts", path: "/admin/pos-discounts", icon: "tag", minRole: OPS },
+      // In-store returns (refunds) across branches/registers, with details and receipts.
+      { labelKey: "admin.nav.posReturns", path: "/admin/pos-returns", icon: "refresh", minRole: OPS },
       // Branches, registers, POS links and register status/history.
       { labelKey: "admin.nav.branches", path: "/admin/branches", icon: "map", minRole: OPS },
+    ],
+  },
+  {
+    labelKey: "admin.nav.groupReports",
+    items: [
+      // Drill-down reports: branch -> till -> day -> shift -> the shift's sales.
+      { labelKey: "admin.nav.posReports", path: "/admin/pos-reports", icon: "layers", minRole: OPS },
     ],
   },
   {
@@ -105,6 +116,7 @@ export const SETTINGS_TABS = [
   { labelKey: "admin.settingsTabs.general", path: "general" },
   { labelKey: "admin.settingsTabs.appearance", path: "appearance" },
   { labelKey: "admin.settingsTabs.language", path: "language" },
+  { labelKey: "admin.settingsTabs.posReturns", path: "posReturns" },
 ];
 
 // Storefront-only settings (SEO, footer contact, shipping/checkout, store

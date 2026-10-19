@@ -29,7 +29,8 @@ import {
   strict,
 } from "./cel.ts";
 import type { ReadCtx, Rules, WriteCtx } from "./types.ts";
-import { timestamp } from "../values.ts";
+import { applyPromotions, isPromotionLive, toPromotionDef } from "../shared/promotions.ts";
+import { timestamp, tsToDate } from "../values.ts";
 
 type Doc = Record<string, any>;
 type Ctx = (ReadCtx | WriteCtx) & { kind?: string };
@@ -64,6 +65,8 @@ function helpers(ctx: Ctx) {
     return strict(d) as Doc;
   };
   const exists = async (path: string) => (await ctx.get(path)) != null;
+  // A document as plain data (no strict missing-field errors), or null.
+  const raw = (path: string) => ctx.get(path);
   const docAfter = async (path: string): Promise<Doc> => {
     const d = await (ctx as WriteCtx).getAfter(path);
     if (!d) throw new RuleError(`getAfter(${path}): no such document`);
@@ -88,6 +91,7 @@ function helpers(ctx: Ctx) {
     doc,
     docAfter,
     exists,
+    raw,
     adminDoc,
     withRole,
     isAnyAdmin,
@@ -186,15 +190,20 @@ const touchedCellKeysForProduct = (lines: any, productId: unknown) =>
     i < lines.length && lines[i].productId === productId ? `${lines[i].variantId}::${lines[i].size}` : "__none__"
   );
 
-function cellDeltaForKeyOrInvalid(before: Doc, after: Doc, key: string): number {
+// `allowNegative`: a till's offline sale being sent -- the units already
+// left with the customer, so the count may go below zero (flagged on the
+// order for review). Never for a web checkout.
+function cellDeltaForKeyOrInvalid(before: Doc, after: Doc, key: string, allowNegative = false): number {
   if (key === "__none__") return 0;
-  return has(before, key) && has(after, key) && after[key].qty <= before[key].qty && after[key].qty >= 0
+  return has(before, key) && has(after, key) && after[key].qty <= before[key].qty && (after[key].qty >= 0 || allowNegative)
     ? before[key].qty - after[key].qty
     : INVALID;
 }
 
 async function stockDecreaseMatchesClaimFlat(h: ReturnType<typeof helpers>, w: WriteCtx, productId: unknown) {
-  const lines = (await h.docAfter(`checkoutClaims/${h.uid()}`)).lines;
+  const claim = await h.docAfter(`checkoutClaims/${h.uid()}`);
+  const lines = claim.lines;
+  const allowNegative = getOr(claim, "offline", false) === true && (await h.isCashierOrAbove());
   const before = effectiveStockByCellFlat(strict(w.before!) as Doc);
   const after = (strict(w.after!) as Doc).stockByCell;
   const claimed = claimedQtyForProduct(lines, productId);
@@ -202,7 +211,7 @@ async function stockDecreaseMatchesClaimFlat(h: ReturnType<typeof helpers>, w: W
   return (
     claimed > 0 &&
     hasOnly(affectedKeys(after, before), ks) &&
-    ks.reduce((s, k) => s + cellDeltaForKeyOrInvalid(before, after, k), 0) === claimed
+    ks.reduce((s, k) => s + cellDeltaForKeyOrInvalid(before, after, k, allowNegative), 0) === claimed
   );
 }
 
@@ -385,6 +394,78 @@ function orderActorUidFieldsValid(h: ReturnType<typeof helpers>, w: WriteCtx) {
   return ORDER_ACTOR_FIELDS.every((f) => !has(a, f) || a[f] === h.uid());
 }
 
+// Must match POS_DISCOUNT_POLICY_DEFAULTS (src/admin/posDiscounts.ts).
+const POS_DISCOUNT_DEFAULT_MAX_PERCENT = 10;
+
+// A cashier's sale discount = automatic promotions + a manual part.
+//  - Promotions: every promotion cited must exist and be live (active, in its
+//    dates, for this branch), and the shared calculator, re-run here on the
+//    claimed lines (the real prices), must give exactly the order's figures
+//    -- per line, per promotion and in total.
+//  - Manual: at most settings/posDiscounts.cashierMaxPercent of what's left
+//    after promotions.
+//  - total = subtotal - (promotions + manual).
+async function isValidCashierDiscount(h: ReturnType<typeof helpers>, a: Doc, w: WriteCtx) {
+  const d = getOr(a, "discount", 0);
+  if (d === 0) return !has(a, "discountSource") && !has(a, "promotions") && getOr(a, "promoDiscount", 0) === 0;
+  const promo = getOr(a, "promoDiscount", 0);
+  // Sales from before promotions existed carry only discountSource "manual".
+  const manual = getOr(a, "manualDiscount", getOr(a, "discountSource", "") === "manual" ? d : 0);
+  if (!(isNumber(d) && d > 0 && isNumber(promo) && promo >= 0 && isNumber(manual) && manual >= 0 && near(d, promo + manual))) return false;
+  const source = promo > 0 ? (manual > 0 ? "mixed" : "promotion") : "manual";
+  if (getOr(a, "discountSource", "") !== source) return false;
+
+  const claimLines = (await h.docAfter(`checkoutClaims/${h.uid()}`)).lines as any[];
+  const sub = claimSubtotal(claimLines);
+  if (!(near(a.subtotal, sub) && near(a.total, a.subtotal - d))) return false;
+
+  if (promo > 0) {
+    const cited = getOr(a, "promotions", []);
+    if (!isList(cited) || cited.length === 0 || cited.length > 20) return false;
+    // An offline sale is checked against the promotions of the moment it was
+    // made (at most 7 days back, never in the future).
+    let now = w.now.getTime();
+    if (getOr(a, "offline", false) === true) {
+      const at = tsToDate(getOr(a, "offlineCreatedAt", null) as never)?.getTime();
+      if (!at || at > now + 5 * 60_000 || at < now - 7 * 24 * 3600_000) return false;
+      now = at;
+    }
+    const defs = [];
+    for (const c of cited as any[]) {
+      const data = await h.raw(`promotions/${c.id}`);
+      if (!data) return false;
+      const def = toPromotionDef(String(c.id), data as Record<string, unknown>);
+      if (!isPromotionLive(def, a.branchId, now)) return false;
+      defs.push(def);
+    }
+    const lines = [];
+    for (const l of firstLines(claimLines)) {
+      const product = await h.raw(`products/${l.productId}`);
+      lines.push({ key: `${l.productId}::${l.variantId}::${l.size}`, productId: l.productId, category: String((product as Doc | null)?.category ?? ""), price: l.price, qty: l.qty });
+    }
+    const res = applyPromotions(lines, defs, { branchId: a.branchId, now });
+    if (!near(res.total, promo)) return false;
+    for (const c of cited as any[]) {
+      const hit = res.applied.find((x) => x.id === c.id);
+      if (!hit || !near(c.amount, hit.amount)) return false;
+    }
+    for (const l of firstLines(a.lines)) {
+      const want = res.lines[`${l.productId}::${l.variantId}::${l.size}`]?.discount ?? 0;
+      if (!near(getOr(l, "promoDiscount", 0), want)) return false;
+    }
+  } else if (has(a, "promotions")) {
+    return false;
+  }
+
+  if (manual > 0) {
+    const s = (await h.exists("settings/posDiscounts")) ? await h.doc("settings/posDiscounts") : {};
+    const pct = getOr(s, "cashierMaxPercent", POS_DISCOUNT_DEFAULT_MAX_PERCENT);
+    if (!isNumber(pct) || pct <= 0) return false;
+    if (manual > r2(((sub - promo) * Math.min(pct, 100)) / 100) + 0.005) return false;
+  }
+  return true;
+}
+
 async function isValidStaffOrderBranch(h: ReturnType<typeof helpers>, w: WriteCtx) {
   if ((await h.adminDoc()).role !== "cashier") return true;
   const a = strict(w.after!) as Doc;
@@ -392,8 +473,8 @@ async function isValidStaffOrderBranch(h: ReturnType<typeof helpers>, w: WriteCt
     !(
       getOr(a, "source", "") === "pos" &&
       inList(getOr(a, "branchId", ""), await h.myBranchIds()) &&
-      getOr(a, "discount", 0) === 0 &&
-      isString(getOr(a, "registerSessionId", null))
+      isString(getOr(a, "registerSessionId", null)) &&
+      (await isValidCashierDiscount(h, a, w))
     )
   ) {
     return false;
@@ -435,6 +516,201 @@ async function isValidCashWithdrawal(h: ReturnType<typeof helpers>, w: WriteCtx)
     d.registerId === getOr(before, "registerId", "") &&
     Math.abs((getOr(after, "cashOutTotal", 0) as number) - ((getOr(before, "cashOutTotal", 0) as number) + d.amount)) < 0.005
   );
+}
+
+// --- POS returns (src/firebase/posReturn.ts) -------------------------------------
+// One return commits, together: the posReturns/{id} record, the sale's
+// returnCounters + refund totals (receipt returns), the receiving branch's
+// branchStock (+ ledger rows) for restocked lines, and the shift's refund
+// totals. Each side is checked against the return record created in the
+// SAME commit (exists after, didn't exist before), so a cashier can only
+// add stock / move refund totals by actually recording a return.
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const r2 = (n: number) => Math.round(n * 100) / 100;
+const near = (a: unknown, b: number) => isNumber(a) && Math.abs(a - b) < 0.005;
+const num = (d: Doc, f: string) => getOr(d, f, 0) as number;
+const ORDER_REFUND_KEYS = ["refundedTotal", "refundedCash", "refundedCard", "returnedQty", "returnedByLine", "returnCount", "refundStatus", "lastReturnId", "updatedAt"];
+const POS_RETURN_KEYS = [
+  "returnNumber", "kind", "orderId", "orderNumber", "saleBranchId", "saleBranchName", "saleRegisterName", "saleCreatedAt",
+  "branchId", "branchName", "branchCode", "registerId", "registerName", "sessionId", "cashierUid", "cashierName", "operatorId",
+  "lines", "itemCount", "refundTotal", "refundMethod", "cashRefund", "cardRefund", "reason", "note", "createdAt",
+];
+// Must match POS_RETURN_POLICY_DEFAULTS (src/admin/posReturns.ts).
+const POS_RETURN_POLICY_DEFAULTS = { windowDays: 14, allowNoReceipt: false };
+
+const queryHasEq = (c: ReadCtx, field: string) => (c.query?.filters ?? []).some((f) => f.field === field && f.op === "==");
+// Must match SEARCH_DAYS_WITHOUT_WINDOW (src/admin/posReturns.ts).
+const RETURN_SEARCH_DAYS_WITHOUT_WINDOW = 90;
+
+// The Returns screen lists every branch's still-returnable POS sales: a
+// query bounded by createdAt >= (now - return period). Older sales, or an
+// unbounded list, stay out of reach for cashiers.
+async function isReturnableSalesQuery(h: ReturnType<typeof helpers>, c: ReadCtx) {
+  const f = (c.query?.filters ?? []).find((x) => x.field === "createdAt" && (x.op === ">=" || x.op === ">"));
+  const since = f ? tsToDate(f.value) : null;
+  if (!since) return false;
+  const { windowDays } = await posReturnPolicy(h);
+  const days = windowDays > 0 ? windowDays : RETURN_SEARCH_DAYS_WITHOUT_WINDOW;
+  // One day of slack for clock differences between the till and the server.
+  return since.getTime() >= c.now.getTime() - (days + 1) * DAY_MS;
+}
+
+// The return being recorded in this very commit.
+async function freshReturn(h: ReturnType<typeof helpers>, id: unknown): Promise<Doc> {
+  if (!isString(id) || id.length === 0) throw new RuleError("no return id");
+  if (await h.exists(`posReturns/${id}`)) throw new RuleError("return already recorded");
+  return h.docAfter(`posReturns/${id}`);
+}
+
+const restockQty = (ret: Doc, productId: unknown, cell: string) =>
+  (ret.lines as any[]).reduce(
+    (s, l) => s + (l.restock === true && l.productId === productId && `${l.variantId}::${l.size}` === cell ? l.qty : 0),
+    0
+  );
+const restockTotal = (ret: Doc, productId: unknown) =>
+  (ret.lines as any[]).reduce((s, l) => s + (l.restock === true && l.productId === productId ? l.qty : 0), 0);
+
+const cellQtyOf = (cells: any, key: string): number => {
+  if (!has(cells, key)) return 0;
+  const q = getOr(cells[key], "qty", 0);
+  return isNumber(q) ? q : 0;
+};
+
+async function posReturnPolicy(h: ReturnType<typeof helpers>) {
+  const s = (await h.exists("settings/posReturns")) ? await h.doc("settings/posReturns") : {};
+  return {
+    windowDays: getOr(s, "windowDays", POS_RETURN_POLICY_DEFAULTS.windowDays) as number,
+    allowNoReceipt: getOr(s, "allowNoReceipt", POS_RETURN_POLICY_DEFAULTS.allowNoReceipt) === true,
+  };
+}
+
+// branchStock create/update by a cashier: exactly the return's restocked
+// units added to the receiving branch, nothing else.
+async function isValidReturnRestock(h: ReturnType<typeof helpers>, w: WriteCtx) {
+  const after = strict(w.after!) as Doc;
+  const before = w.before ? (strict(w.before) as Doc) : null;
+  const branchId = before ? before.branchId : after.branchId;
+  const productId = before ? before.productId : after.productId;
+  const ret = await freshReturn(h, after.lastReturnId);
+  if (ret.branchId !== branchId || !(await h.canSellAtBranch(branchId))) return false;
+  if (before) {
+    if (!hasOnly(affectedKeys(w.after, w.before), ["stockByCell", "updatedAt", "lastReturnId"])) return false;
+  } else if (
+    !(
+      isString(branchId) &&
+      isString(productId) &&
+      w.id === `${branchId}__${productId}` &&
+      hasOnly(keys(after), ["branchId", "productId", "stockByCell", "lastReturnId", "createdAt", "updatedAt"])
+    )
+  ) {
+    return false;
+  }
+  if (!isMap(after.stockByCell)) return false;
+  const bc = before ? getOr(before, "stockByCell", {}) : {};
+  const ac = after.stockByCell;
+  const changed = affectedKeys(ac, bc);
+  let added = 0;
+  for (const k of changed) {
+    const want = restockQty(ret, productId, k);
+    if (!(want > 0 && has(ac, k) && cellQtyOf(ac, k) - cellQtyOf(bc, k) === want)) return false;
+    added += want;
+  }
+  return added > 0 && added === restockTotal(ret, productId);
+}
+
+async function isValidPosReturn(h: ReturnType<typeof helpers>, w: WriteCtx, a: Doc) {
+  const uid = h.uid();
+  if (!(await h.isCashierOrAbove())) return false;
+  if (!(hasOnly(keys(a), POS_RETURN_KEYS) && a.cashierUid === uid && inList(a.kind, ["receipt", "no_receipt"]))) return false;
+  if (!(nonEmpty(a.returnNumber) && inList(a.reason, RETURN_REASONS) && eq(a.createdAt, timestamp(w.now)))) return false;
+  if (!(isString(getOr(a, "note", "")) && size(getOr(a, "note", "")) <= 300)) return false;
+  if (!(isList(a.lines) && a.lines.length > 0 && a.lines.length <= MAX_LINES)) return false;
+
+  const lines = a.lines as any[];
+  const seen = new Set<string>();
+  let refundSum = 0;
+  let units = 0;
+  for (const l of lines) {
+    const k = `${l.productId}::${l.variantId}::${l.size}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    if (!(nonEmpty(l.productId) && nonEmpty(l.variantId) && nonEmpty(l.size) && isInt(l.qty) && l.qty > 0)) return false;
+    if (!(isNumber(l.unitPrice) && l.unitPrice >= 0 && isNumber(l.refund) && l.refund >= 0 && isBool(l.restock))) return false;
+    if (l.refund > l.unitPrice * l.qty + 0.005) return false;
+    refundSum += l.refund;
+    units += l.qty;
+  }
+  const cash = a.cashRefund;
+  const card = a.cardRefund;
+  if (!(isNumber(cash) && cash >= 0 && isNumber(card) && card >= 0)) return false;
+  if (!(near(a.refundTotal, r2(refundSum)) && near(cash + card, a.refundTotal) && a.itemCount === units)) return false;
+  if (a.refundMethod !== (card > 0 && cash > 0 ? "split" : card > 0 ? "card" : "cash")) return false;
+
+  // The shift paying the refund: the cashier's own open session at this branch.
+  const s = await h.doc(`registerSessions/${a.sessionId}`);
+  const sAfter = await h.docAfter(`registerSessions/${a.sessionId}`);
+  if (!(s.status === "open" && s.cashierId === uid && getOr(s, "branchId", "") === a.branchId && getOr(s, "registerId", "") === a.registerId)) return false;
+  if (!(await h.canSellAtBranch(a.branchId))) return false;
+  const drawer = r2(num(s, "startingCash") + num(s, "cashTotal") - num(s, "cashOutTotal") - num(s, "cashRefundTotal"));
+  if (cash > drawer + 0.005) return false;
+  if (
+    !(
+      num(sAfter, "refundCount") === num(s, "refundCount") + 1 &&
+      near(num(sAfter, "refundTotal"), num(s, "refundTotal") + a.refundTotal) &&
+      near(num(sAfter, "cashRefundTotal"), num(s, "cashRefundTotal") + cash) &&
+      near(num(sAfter, "cardRefundTotal"), num(s, "cardRefundTotal") + card)
+    )
+  ) {
+    return false;
+  }
+
+  // Restocked units really landed in the receiving branch's stock.
+  for (const l of lines.filter((x) => x.restock === true)) {
+    const path = `branchStock/${a.branchId}__${l.productId}`;
+    const key = `${l.variantId}::${l.size}`;
+    const before = (await h.exists(path)) ? cellQtyOf(getOr(await h.doc(path), "stockByCell", {}), key) : 0;
+    if (cellQtyOf(getOr(await h.docAfter(path), "stockByCell", {}), key) !== before + l.qty) return false;
+  }
+
+  const policy = await posReturnPolicy(h);
+  if (a.kind === "no_receipt") {
+    if (!policy.allowNoReceipt || has(a, "orderId")) return false;
+    for (const l of lines) {
+      const p = await h.doc(`products/${l.productId}`);
+      if (!(l.unitPrice === p.price && near(l.refund, r2(p.price * l.qty)))) return false;
+    }
+    return true;
+  }
+
+  const o = await h.doc(`orders/${a.orderId}`);
+  const oAfter = await h.docAfter(`orders/${a.orderId}`);
+  if (!(getOr(o, "source", "") === "pos" && getOr(o, "status", "") !== "cancelled" && a.orderNumber === o.orderNumber)) return false;
+  if (policy.windowDays > 0) {
+    const sold = tsToDate(o.createdAt);
+    if (!sold || w.now.getTime() > sold.getTime() + policy.windowDays * DAY_MS) return false;
+  }
+  if (
+    !(
+      oAfter.lastReturnId === w.id &&
+      near(num(oAfter, "refundedTotal"), num(o, "refundedTotal") + a.refundTotal) &&
+      num(oAfter, "refundedTotal") <= o.total + 0.005 &&
+      near(num(oAfter, "refundedCash"), num(o, "refundedCash") + cash) &&
+      near(num(oAfter, "refundedCard"), num(o, "refundedCard") + card) &&
+      num(oAfter, "refundedCard") <= num(o, "cardAmount") + 0.005
+    )
+  ) {
+    return false;
+  }
+  for (const l of lines) {
+    if (!firstLines(o.lines).some((x) => x.productId === l.productId && x.variantId === l.variantId && x.size === l.size && x.price === l.unitPrice)) return false;
+    const path = `returnCounters/${returnCounterId(a.orderId, l.productId, l.variantId, l.size)}`;
+    const before = (await h.exists(path)) ? (await h.doc(path)).returnedQty : 0;
+    if ((await h.docAfter(path)).returnedQty !== before + l.qty) return false;
+    // The sale's per-line copy matches the counter.
+    if (getOr(getOr(oAfter, "returnedByLine", {}), `${l.productId}::${l.variantId}::${l.size}`, -1) !== before + l.qty) return false;
+  }
+  return true;
 }
 
 const isCounterInt = (v: unknown) => isInt(v) && v >= 0;
@@ -518,13 +794,17 @@ const COLLECTIONS: Record<string, CollectionRules> = {
 
   branchStock: {
     read: (h) => h.isAnyAdmin(),
-    create: async (h, w, a) =>
-      (await h.isEditorOrAbove()) &&
-      isString(a.branchId) &&
-      isString(a.productId) &&
-      w.id === `${a.branchId}__${a.productId}` &&
-      isMap(a.stockByCell),
-    update: (h, w) => h.signedIn() && isValidBranchStockWrite(h, w),
+    create: (h, w, a) =>
+      any(
+        async () =>
+          (await h.isEditorOrAbove()) &&
+          isString(a.branchId) &&
+          isString(a.productId) &&
+          w.id === `${a.branchId}__${a.productId}` &&
+          isMap(a.stockByCell),
+        async () => (await h.isCashierOrAbove()) && isValidReturnRestock(h, w)
+      ),
+    update: (h, w) => h.signedIn() && any(() => isValidBranchStockWrite(h, w), () => isValidReturnRestock(h, w)),
     delete: (h) => h.isEditorOrAbove(),
   },
 
@@ -600,12 +880,26 @@ const COLLECTIONS: Record<string, CollectionRules> = {
   },
 
   orders: {
-    read: (h, _c, d) =>
+    // A cashier also reaches another branch's POS sale when taking it back:
+    // by its id, by a query on its receipt number, or in the Returns
+    // screen's list of sales still inside the return period -- never older
+    // or unbounded lists of other branches' sales.
+    get: (h, _c, d) =>
       any(
         () => h.withRole(["owner", "admin", "editor"]),
         async () =>
           (await h.withRole(["cashier"])) &&
-          (inList(getOr(d, "source", ""), ["web", "manual"]) || inList(getOr(d, "branchId", ""), await h.myBranchIds())),
+          (keys(d).length === 0 || inList(getOr(d, "source", ""), ["web", "manual", "pos"]) || inList(getOr(d, "branchId", ""), await h.myBranchIds())),
+        () => h.signedIn() && d.customerId === h.uid()
+      ),
+    list: (h, c, d) =>
+      any(
+        () => h.withRole(["owner", "admin", "editor"]),
+        async () =>
+          (await h.withRole(["cashier"])) &&
+          (inList(getOr(d, "source", ""), ["web", "manual"]) ||
+            inList(getOr(d, "branchId", ""), await h.myBranchIds()) ||
+            (getOr(d, "source", "") === "pos" && (queryHasEq(c, "orderNumber") || (await isReturnableSalesQuery(h, c))))),
         () => h.signedIn() && d.customerId === h.uid()
       ),
     create: (h, w) =>
@@ -616,9 +910,61 @@ const COLLECTIONS: Record<string, CollectionRules> = {
     update: (h, w) =>
       any(
         async () => (await h.isAdminOrAbove()) && isValidNonDeliveryUpdate(w) && orderActorUidFieldsValid(h, w),
-        async () => (await h.isBranchNoteEditorOrAbove()) && isValidCashierBranchNoteUpdate(w) && orderActorUidFieldsValid(h, w)
+        async () => (await h.isBranchNoteEditorOrAbove()) && isValidCashierBranchNoteUpdate(w) && orderActorUidFieldsValid(h, w),
+        // Marking an offline sale's stock shortage as reviewed (Admin → POS
+        // Sales). Only these fields, so the sale's own actor fields
+        // (cashierUid...) needn't match the admin.
+        async () =>
+          (await h.isAdminOrAbove()) &&
+          getOr(strict(w.before!), "offline", false) === true &&
+          hasOnly(affectedKeys(w.after, w.before), ["shortageReviewedAt", "shortageReviewedByName", "shortageReviewNote"]) &&
+          eq((strict(w.after!) as Doc).shortageReviewedAt, timestamp(w.now)) &&
+          size(getOr(strict(w.after!), "shortageReviewNote", "")) <= 500,
+        // Refund totals of a POS sale, moved only together with the return
+        // that justifies them (isValidPosReturn checks the figures).
+        async () =>
+          (await h.isCashierOrAbove()) &&
+          hasOnly(affectedKeys(w.after, w.before), ORDER_REFUND_KEYS) &&
+          (await freshReturn(h, (strict(w.after!) as Doc).lastReturnId)).orderId === w.id
       ),
     delete: (h) => h.isAdminOrAbove(),
+  },
+
+  // Automatic promotions: admins manage them, every till reads them.
+  promotions: (() => {
+    const valid = (a: Doc) =>
+      isString(a.name) &&
+      a.name.length > 0 &&
+      a.name.length <= 80 &&
+      isBool(a.active) &&
+      inList(a.type, ["percent", "amount", "buy_x_get_y", "bundle"]) &&
+      inList(a.scope, ["products", "categories", "sale"]) &&
+      isNumber(a.value) &&
+      a.value >= 0 &&
+      (a.type !== "percent" || a.value <= 100) &&
+      (a.scope !== "sale" || inList(a.type, ["percent", "amount"]));
+    return {
+      read: (h: H) => h.isAnyAdmin(),
+      create: async (h: H, _w: WriteCtx, a: Doc) => (await h.isAdminOrAbove()) && valid(a),
+      update: async (h: H, _w: WriteCtx, a: Doc) => (await h.isAdminOrAbove()) && valid(a),
+      delete: (h: H) => h.isAdminOrAbove(),
+    };
+  })(),
+
+  posReturns: {
+    // By id (unguessable; also how a return checks it isn't a resubmit).
+    get: (h) => h.withRole(["owner", "admin", "editor", "viewer", "cashier"]),
+    list: (h, c, d) =>
+      any(
+        () => h.withRole(["owner", "admin", "editor", "viewer"]),
+        async () =>
+          (await h.withRole(["cashier"])) &&
+          (inList(getOr(d, "branchId", ""), await h.myBranchIds()) ||
+            inList(getOr(d, "saleBranchId", ""), await h.myBranchIds()) ||
+            queryHasEq(c, "orderId"))
+      ),
+    create: (h, w, a) => isValidPosReturn(h, w, a),
+    // Immutable: a return is corrected by another return, never edited.
   },
 
   returns: {
@@ -676,6 +1022,28 @@ const COLLECTIONS: Record<string, CollectionRules> = {
       const actorOk = () => !has(a, "actorUid") || a.actorUid === h.uid();
       return any(
         async () => (await h.isEditorOrAbove()) && actorOk(),
+        // Ledger row for a unit a POS return put back into branch stock.
+        async () => {
+          if (
+            !(
+              (await h.isCashierOrAbove()) &&
+              a.reason === "return_restock" &&
+              a.source === "pos" &&
+              nonEmpty(a.productId) &&
+              nonEmpty(a.variantId) &&
+              nonEmpty(a.size) &&
+              isInt(a.qtyBefore) &&
+              isInt(a.qtyChange) &&
+              a.qtyChange > 0 &&
+              a.qtyAfter === a.qtyBefore + a.qtyChange &&
+              actorOk()
+            )
+          ) {
+            return false;
+          }
+          const ret = await freshReturn(h, a.returnId);
+          return ret.branchId === a.branchId && ret.cashierUid === h.uid() && restockQty(ret, a.productId, `${a.variantId}::${a.size}`) === a.qtyChange;
+        },
         () =>
           h.signedIn() &&
           a.reason === "sale" &&
@@ -721,6 +1089,88 @@ const COLLECTIONS: Record<string, CollectionRules> = {
       (!has(a, "closedByUid") || a.closedByUid === h.uid()),
     delete: (h) => h.isAdminOrAbove(),
   },
+
+  // Sales put on hold at a till (src/firebase/heldSales.ts). A cashier holds
+  // from their own open shift at their branch; any till of that branch may
+  // take it back (held -> resumed) or drop it (held -> cancelled) -- once, so
+  // two tills can never both carry on with it. Only those status changes.
+  heldSales: (() => {
+    const HELD_SALE_TTL_MS = 24 * 60 * 60 * 1000; // must match src/firebase/heldSales.ts
+    const branchStaff = async (h: H, branchId: unknown) =>
+      (await h.withRole(["owner", "admin", "editor", "viewer"])) || (await h.canSellAtBranch(branchId));
+    return {
+      read: (h: H, _c: ReadCtx, d: Doc) => branchStaff(h, getOr(d, "branchId", "")),
+      create: async (h: H, w: WriteCtx, a: Doc) => {
+        if (!(await h.isCashierOrAbove()) || !(await h.canSellAtBranch(a.branchId))) return false;
+        if (!(a.status === "held" && a.cashierUid === h.uid() && isString(a.ref) && isList(a.lines) && a.lines.length > 0 && a.lines.length <= MAX_LINES)) return false;
+        if (!eq(a.createdAt, timestamp(w.now))) return false;
+        const s = await h.doc(`registerSessions/${a.sessionId}`);
+        return s.status === "open" && s.cashierId === h.uid() && getOr(s, "branchId", "") === a.branchId;
+      },
+      update: async (h: H, w: WriteCtx, a: Doc, b: Doc) => {
+        if (!(await h.isCashierOrAbove()) || !(await h.canSellAtBranch(b.branchId)) || b.status !== "held") return false;
+        const changed = affectedKeys(w.after, w.before);
+        if (a.status === "resumed") {
+          const created = tsToDate(b.createdAt);
+          return (
+            hasOnly(changed, ["status", "resumedByUid", "resumedByName", "resumedSessionId", "resumedAt", "updatedAt"]) &&
+            a.resumedByUid === h.uid() &&
+            !!created &&
+            w.now.getTime() - created.getTime() <= HELD_SALE_TTL_MS
+          );
+        }
+        if (a.status === "cancelled") {
+          return hasOnly(changed, ["status", "cancelledByUid", "cancelledByName", "cancelledAt", "updatedAt"]) && a.cancelledByUid === h.uid();
+        }
+        return false;
+      },
+      delete: (h: H) => h.isAdminOrAbove(),
+    };
+  })(),
+
+  // Offline sales the server couldn't record as they were (shift closed, a
+  // promotion changed meanwhile...): reported by the till so nothing is lost,
+  // reviewed and marked resolved by owner/admin.
+  posSyncIssues: {
+    read: async (h, _c, d) => (await h.withRole(["owner", "admin", "editor", "viewer"])) || (await h.canSellAtBranch(getOr(d, "branchId", ""))),
+    create: async (h, w, a) =>
+      (await h.isCashierOrAbove()) &&
+      (await h.canSellAtBranch(a.branchId)) &&
+      a.status === "open" &&
+      a.cashierUid === h.uid() &&
+      isString(a.orderNumber) &&
+      isString(a.reason) &&
+      eq(a.reportedAt, timestamp(w.now)),
+    update: async (h, w, a) =>
+      (await h.isAdminOrAbove()) && hasOnly(affectedKeys(w.after, w.before), ["status", "resolvedByUid", "resolvedByName", "resolvedAt", "resolution"]) && a.resolvedByUid === h.uid(),
+    delete: (h) => h.isAdminOrAbove(),
+  },
+
+  // End-of-day snapshots of a branch (Admin → Branches → End of day): one
+  // per branch per day, id "<branchId>__<yyyy-mm-dd>". Owner/admin close the
+  // day; closing it again replaces the figures as the next version.
+  branchDaySnapshots: (() => {
+    const valid = (h: H, w: WriteCtx, a: Doc) =>
+      isString(a.branchId) &&
+      isString(a.date) &&
+      /^\d{4}-\d{2}-\d{2}$/.test(a.date) &&
+      w.id === `${a.branchId}__${a.date}` &&
+      isMap(a.figures) &&
+      a.closedByUid === h.uid() &&
+      isString(a.closedByName) &&
+      eq(a.closedAt, timestamp(w.now)) &&
+      isNumber(a.version) &&
+      size(getOr(a, "note", "")) <= 500;
+    return {
+      read: (h: H) => h.isAdminOrAbove(),
+      create: async (h: H, w: WriteCtx, a: Doc) => (await h.isAdminOrAbove()) && valid(h, w, a) && a.version === 1,
+      update: async (h: H, w: WriteCtx, a: Doc) => {
+        const before = strict(w.before!) as Doc;
+        return (await h.isAdminOrAbove()) && valid(h, w, a) && a.branchId === before.branchId && a.date === before.date && a.version === (getOr(before, "version", 0) as number) + 1;
+      },
+      delete: (h: H) => h.isOwner(),
+    };
+  })(),
 
   cashMovements: {
     read: (h) => h.isAnyAdmin(),

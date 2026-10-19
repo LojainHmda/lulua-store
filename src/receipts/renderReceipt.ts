@@ -59,6 +59,19 @@ export interface ReceiptData {
   // POS only: "Branch · Register · Cashier" line under the order number.
   // Omitted entirely (no blank row) when absent -- web invoices never set it.
   storeLine?: string;
+  // A refund receipt for an in-store return: orderNumber is then the return
+  // number, line prices are what each line refunded, total is the refund and
+  // the payment rows say how it was paid back. refundOf = the original
+  // sale's number (absent for a return without a receipt).
+  isRefund?: boolean;
+  refundOf?: string;
+  // Shown after "Discount", e.g. "manual 10%".
+  discountNote?: string;
+  // Made while the till was offline (printed under the store line).
+  offline?: boolean;
+  // Automatic promotions applied (POS), each with what it took off. `discount`
+  // is then only the manual part.
+  promotions?: { name: string; amount: number }[];
 }
 
 const PALETTE = {
@@ -88,6 +101,12 @@ const LABELS = {
     card: "Card",
     split: "Split",
     sku: "SKU",
+    refundReceipt: "Refund receipt",
+    returnNo: "Return",
+    originalSale: "Original sale",
+    refundTotal: "Refund total",
+    refundMethod: "Refunded to",
+    offlineSale: "Offline sale — recorded when the till reconnected",
     thankYou: "Thank you for shopping with لؤلؤة.",
     dir: "ltr" as const,
     font: "'Archivo', 'Inter', sans-serif",
@@ -110,6 +129,12 @@ const LABELS = {
     card: "بطاقة",
     split: "مختلط",
     sku: "رمز المنتج",
+    refundReceipt: "إيصال استرجاع",
+    returnNo: "مرتجع",
+    originalSale: "البيع الأصلي",
+    refundTotal: "إجمالي المسترد",
+    refundMethod: "طريقة الاسترداد",
+    offlineSale: "بيع دون اتصال — يُسجَّل عند عودة الاتصال",
     thankYou: "شكراً لتسوقك من لؤلؤة.",
     dir: "rtl" as const,
     font: "'Cairo', 'Tajawal', sans-serif",
@@ -210,9 +235,9 @@ export async function renderReceiptCanvas(data: ReceiptData, lang: "en" | "ar"):
   const codesHeight = hasCodes ? 90 : 0;
   const tableHeaderHeight = 30;
   const paymentRows = data.paymentMethod ? (data.paymentMethod === "split" ? 3 : 1) : 0;
-  const totalsHeight = 130 + paymentRows * 26;
+  const totalsHeight = 130 + paymentRows * 26 + (data.promotions?.length ?? 0) * 20;
   const footerHeight = 70;
-  const storeLineHeight = data.storeLine ? 20 : 0;
+  const storeLineHeight = (data.storeLine ? 20 : 0) + (data.isRefund && data.refundOf ? 20 : 0) + (data.offline ? 20 : 0);
   const height = headerHeight + storeLineHeight + metaHeight + codesHeight + tableHeaderHeight + data.lines.length * rowHeight + totalsHeight + footerHeight;
 
   const canvas = document.createElement("canvas");
@@ -253,18 +278,28 @@ export async function renderReceiptCanvas(data: ReceiptData, lang: "en" | "ar"):
   ctx.fillStyle = PALETTE.ink;
   ctx.font = `700 22px ${t.font}`;
   ctx.textAlign = startAlign;
-  ctx.fillText(data.source === "pos" ? t.receipt : t.invoice, leftEdge, y);
+  ctx.fillText(data.isRefund ? t.refundReceipt : data.source === "pos" ? t.receipt : t.invoice, leftEdge, y);
   y += 30;
 
   ctx.fillStyle = PALETTE.inkSoft;
   ctx.font = `400 13px ${t.fontBody}`;
-  ctx.fillText(`${t.order} #${data.orderNumber}`, leftEdge, y);
+  ctx.fillText(`${data.isRefund ? t.returnNo : t.order} #${data.orderNumber}`, leftEdge, y);
   ctx.textAlign = endAlign;
   ctx.fillText(`${t.date}: ${data.createdAt.toLocaleDateString(lang === "ar" ? "ar" : "en-US", { year: "numeric", month: "short", day: "numeric" })}`, rightEdge, y);
   if (data.storeLine) {
     y += 20;
     ctx.textAlign = startAlign;
     ctx.fillText(data.storeLine, leftEdge, y);
+  }
+  if (data.isRefund && data.refundOf) {
+    y += 20;
+    ctx.textAlign = startAlign;
+    ctx.fillText(`${t.originalSale} #${data.refundOf}`, leftEdge, y);
+  }
+  if (data.offline) {
+    y += 20;
+    ctx.textAlign = startAlign;
+    ctx.fillText(t.offlineSale, leftEdge, y);
   }
   y += 30;
 
@@ -423,15 +458,16 @@ export async function renderReceiptCanvas(data: ReceiptData, lang: "en" | "ar"):
   }
 
   totalsRow(t.subtotal, money(data.subtotal));
-  if (data.discount) totalsRow(t.discount, `-${money(data.discount)}`);
-  totalsRow(t.shipping, data.shipping === 0 ? "—" : money(data.shipping));
+  for (const promo of data.promotions ?? []) totalsRow(promo.name, `-${money(promo.amount)}`);
+  if (data.discount) totalsRow(data.discountNote ? `${t.discount} (${data.discountNote})` : t.discount, `-${money(data.discount)}`);
+  if (!data.isRefund) totalsRow(t.shipping, data.shipping === 0 ? "—" : money(data.shipping));
   y += 6;
-  totalsRow(t.total, money(data.total), true);
+  totalsRow(data.isRefund ? t.refundTotal : t.total, money(data.total), true);
 
   if (data.paymentMethod) {
     y += 8;
     const methodLabel = { cash: t.cash, card: t.card, split: t.split }[data.paymentMethod];
-    totalsRow(t.payment, methodLabel);
+    totalsRow(data.isRefund ? t.refundMethod : t.payment, methodLabel);
     // Cash/card amounts are the portion of the total allocated to each
     // method, not the physical bill tendered (which this app never
     // records) — only worth showing when split, where the breakdown

@@ -1,4 +1,5 @@
 import { where } from "../../db/firestore";
+import { Link } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adminsApi, branchesApi, registersApi, registerSessionsApi } from "../../firebase/collections";
 import { useLanguage } from "../../context/LanguageContext";
@@ -287,6 +288,13 @@ export default function Branches() {
                       {!b.active && <Badge tone="neutral">{t("admin.team.inactive")}</Badge>}
                     </p>                  </div>
                   <div className="flex gap-2">
+                    <Link
+                      to={`/admin/branches/${b.id}/day`}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-wine px-3 py-1.5 text-sm font-semibold text-on-accent hover:bg-wine-dark"
+                    >
+                      <AdminIcon name="chart" className="h-4 w-4" />
+                      {t("admin.dayEnd.title")}
+                    </Link>
                     <AdminButton
                       size="sm"
                       icon="edit"

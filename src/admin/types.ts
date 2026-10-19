@@ -190,6 +190,11 @@ export interface OrderLine {
   // order-level note. Absent (not an empty string) when the customer left
   // it blank; placeOrder() trims and omits it entirely in that case.
   note?: string;
+  // POS: what an automatic item promotion took off this line (all units),
+  // and which promotion. Absent = no item promotion on the line.
+  promoDiscount?: number;
+  promotionId?: string;
+  promotionName?: string;
 }
 
 export type PaymentMethod = "cash" | "card" | "split";
@@ -226,6 +231,29 @@ export interface AdminOrder {
   // orderTransaction.ts and firestore.rules' isValidDiscountForOrder).
   // Never set for a POS sale's manual, cashier-applied discount amount.
   discountId?: string;
+  // POS only: where `discount` came from. "manual" = typed in at the till
+  // (discountPercent set when entered as a percentage). Absent = no discount
+  // or a sale from before this field existed.
+  // "promotion" = only automatic promotions, "mixed" = promotions + manual.
+  discountSource?: "manual" | "promotion" | "mixed";
+  discountPercent?: number;
+  // POS: the two parts of `discount` (= promoDiscount + manualDiscount), and
+  // every promotion applied with what it took off (item and whole-sale).
+  promoDiscount?: number;
+  manualDiscount?: number;
+  promotions?: { id: string; name: string; amount: number }[];
+  // POS sale made while the till was offline and sent later: createdAt (and
+  // offlineCreatedAt) = when it happened at the till, syncedAt = when it
+  // reached the server. stockShortage = units sold beyond the branch's
+  // count at sync time (stock went below zero) -- for review; reviewed once
+  // an admin marks it (shortageReviewedAt/By).
+  offline?: boolean;
+  offlineCreatedAt?: unknown;
+  syncedAt?: unknown;
+  stockShortage?: { productId: string; variantId: string; size: string; name: string; short: number }[];
+  shortageReviewedAt?: unknown;
+  shortageReviewedByName?: string;
+  shortageReviewNote?: string;
   total: number;
   status: OrderStatus;
   // The delivery zone the customer selected at checkout (web orders only --
@@ -260,6 +288,17 @@ export interface AdminOrder {
   // POS device sales only: the staff member who started the shift (copied
   // from the session's operatorId). cashierUid is then the device itself.
   operatorId?: string;
+  // In-store returns against this POS sale (posReturn.ts), running totals.
+  // The sale itself (lines, total, status) is never rewritten by a return.
+  refundedTotal?: number;
+  refundedCash?: number;
+  refundedCard?: number;
+  returnedQty?: number;
+  // Units returned so far per line, keyed "<productId>::<variantId>::<size>".
+  returnedByLine?: Record<string, number>;
+  returnCount?: number;
+  refundStatus?: "partial" | "full";
+  lastReturnId?: string;
   shippingAddress?: string;
   notes?: string;
   policyConsent?: OrderPolicyConsent;
@@ -586,8 +625,184 @@ export interface RegisterSession {
   closedByUid?: string;
   closedByEmail?: string;
   closedByName?: string;
+  // In-store returns refunded on this shift (see posReturn.ts). Cash refunds
+  // leave this drawer, so they come off the expected cash. Absent on
+  // sessions from before returns existed (read as 0).
+  refundCount?: number;
+  refundTotal?: number;
+  cashRefundTotal?: number;
+  cardRefundTotal?: number;
   createdAt?: unknown;
   updatedAt?: unknown;
+}
+
+// One line of an in-store return. `unitPrice` is the price the item was sold
+// at (or, for a return without a receipt, the product's price at the time of
+// the return); `refund` is what this line actually paid back, after the
+// sale's discount share. `restock` = the unit went back into the receiving
+// branch's stock; false = damaged/unsellable, kept out of stock.
+export interface PosReturnLine {
+  productId: string;
+  variantId: string;
+  size: string;
+  name: string;
+  color: string;
+  qty: number;
+  unitPrice: number;
+  refund: number;
+  restock: boolean;
+}
+
+export type PosRefundMethod = "cash" | "card" | "split";
+
+// An offline till sale the server couldn't record as it was (e.g. a
+// promotion changed, or the shift was closed meanwhile). Reported by the
+// till for an admin to settle by hand; `sale` is what the till tried to send.
+export interface PosSyncIssue {
+  id: string;
+  orderNumber: string;
+  status: "open" | "resolved";
+  reason: string;
+  message: string;
+  branchId: string;
+  registerId: string;
+  registerName: string;
+  sessionId: string;
+  cashierUid: string;
+  cashierName: string;
+  saleCreatedAt?: unknown;
+  total: number;
+  itemCount: number;
+  lines: { name: string; color?: string; size?: string; qty: number; price: number }[];
+  reportedAt?: unknown;
+  resolvedByUid?: string;
+  resolvedByName?: string;
+  resolvedAt?: unknown;
+  resolution?: string;
+}
+
+// An in-store return (refund) rung up at a POS register. Immutable once
+// written. Linked to the original sale when there is one ("receipt");
+// "no_receipt" only when the return policy allows it. The receiving branch
+// (where the goods came back and the money went out) can differ from the
+// sale's branch -- both are recorded.
+export interface PosReturn {
+  id: string;
+  returnNumber: string;
+  kind: "receipt" | "no_receipt";
+  orderId?: string;
+  orderNumber?: string;
+  saleBranchId?: string;
+  saleBranchName?: string;
+  saleRegisterName?: string;
+  saleCreatedAt?: unknown;
+  branchId: string;
+  branchName?: string;
+  branchCode?: string;
+  registerId: string;
+  registerName?: string;
+  sessionId: string;
+  cashierUid: string;
+  cashierName: string;
+  operatorId?: string;
+  lines: PosReturnLine[];
+  itemCount: number;
+  refundTotal: number;
+  refundMethod: PosRefundMethod;
+  cashRefund: number;
+  cardRefund: number;
+  reason: ReturnReason;
+  note?: string;
+  createdAt?: unknown;
+}
+
+// An automatic promotion (Admin → Point of Sale → Discounts → Promotions).
+// The till applies live ones by itself; the calculator and the rules for how
+// promotions combine are in services/api/src/shared/promotions.ts.
+export interface AdminPromotion {
+  id: string;
+  name: string;
+  description?: string;
+  active: boolean;
+  type: "percent" | "amount" | "buy_x_get_y" | "bundle";
+  scope: "products" | "categories" | "sale";
+  value: number;
+  buyQty?: number;
+  getQty?: number;
+  getPercent?: number;
+  bundleQty?: number;
+  productIds?: string[];
+  // As picked in the editor, and resolved to slugs (with sub-categories) on save.
+  categoryIds?: string[];
+  categorySlugs?: string[];
+  minSubtotal?: number;
+  branchIds?: string[];
+  startsAt?: unknown;
+  endsAt?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+// One cart line as it was when the sale was put on hold.
+export interface HeldSaleLine {
+  productId: string;
+  variantId: string;
+  size: string;
+  qty: number;
+  name: string;
+  color: string;
+  price: number;
+  imageId?: string;
+  imageUrl?: string;
+}
+
+// A sale put on hold at a till (src/firebase/heldSales.ts): no sale record,
+// no stock change. Resumable from any till of the same branch for 24 hours;
+// "resumed" / "cancelled" are final.
+export interface HeldSale {
+  id: string;
+  ref: string;
+  status: "held" | "resumed" | "cancelled";
+  branchId: string;
+  branchCode?: string;
+  registerId: string;
+  registerName?: string;
+  sessionId: string;
+  cashierUid: string;
+  cashierName: string;
+  lines: HeldSaleLine[];
+  itemCount: number;
+  subtotal: number;
+  customerName?: string;
+  note?: string;
+  discountMode?: "percent" | "amount";
+  discountValue?: number;
+  resumedByUid?: string;
+  resumedByName?: string;
+  resumedSessionId?: string;
+  resumedAt?: unknown;
+  cancelledByUid?: string;
+  cancelledByName?: string;
+  cancelledAt?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+// settings/posDiscounts: how much of a sale a cashier may take off by hand
+// at the till (owner/admin are not limited). 0 = cashiers can't discount.
+export interface PosDiscountPolicyDoc {
+  cashierMaxPercent: number;
+}
+
+// settings/posReturns: the in-store return policy, editable by owner/admin.
+export interface PosReturnPolicyDoc {
+  // Days after the sale a receipt return is still accepted; 0 = no limit.
+  windowDays: number;
+  // Returns without the original sale (refund at today's price).
+  allowNoReceipt: boolean;
+  // Category doc ids whose products (including sub-categories) can't be
+  // returned in store.
+  nonReturnableCategoryIds: string[];
 }
 
 // Cash taken out of a till's drawer during an open shift (a pay-out, a

@@ -342,8 +342,9 @@ function OrderDetailView({
 }) {
   const placedAt = tsToDate(order.createdAt);
   const [returnModalOpen, setReturnModalOpen] = useState(false);
+  // In-store sales are returned at a till (POS Returns), with their refund.
   const canProcessReturn =
-    !!session && ["owner", "admin", "cashier"].includes(session.role) && RETURNABLE_ORDER_STATUSES.includes(order.status);
+    !!session && ["owner", "admin", "cashier"].includes(session.role) && order.source !== "pos" && RETURNABLE_ORDER_STATUSES.includes(order.status);
 
   return (
     <>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { AdminOrder } from "../admin/types";
+import type { AdminOrder, PosReturn } from "../admin/types";
 import { useLanguage } from "../context/LanguageContext";
 import { unsplash } from "../utils/unsplash";
 import { downloadCanvas, printCanvas, renderReceiptCanvas, type ReceiptData } from "./renderReceipt";
@@ -64,7 +64,11 @@ export function orderToReceiptData(
       sku: skuByProductId?.[l.productId],
     })),
     subtotal: order.subtotal,
-    discount: order.discount,
+    // Promotions get their own rows; `discount` is then only the manual part.
+    discount: order.promotions?.length ? (order.manualDiscount ?? 0) : order.discount,
+    discountNote:
+      order.discountSource === "manual" || order.discountSource === "mixed" ? ["manual", order.discountPercent ? `${order.discountPercent}%` : ""].filter(Boolean).join(" ") : undefined,
+    promotions: order.promotions?.map((p) => ({ name: p.name, amount: p.amount })),
     shipping: order.shipping,
     total: order.total,
     source: order.source === "pos" ? "pos" : "web",
@@ -72,6 +76,28 @@ export function orderToReceiptData(
     cashAmount: order.cashAmount,
     cardAmount: order.cardAmount,
     storeLine: order.source === "pos" ? posStoreLine(order) : undefined,
+  };
+}
+
+// Refund receipt for an in-store return (posReturn.ts). The barcode carries
+// the return number, the way a sale receipt's carries the sale number.
+export function posReturnToReceiptData(ret: PosReturn, barcodeDataUrl?: string | null): ReceiptData {
+  return {
+    orderBarcodeDataUrl: barcodeDataUrl ?? undefined,
+    orderNumber: ret.returnNumber,
+    createdAt: toDate(ret.createdAt),
+    customerName: "Walk-in customer",
+    lines: ret.lines.map((l) => ({ name: l.name, color: l.color, size: l.size, qty: l.qty, price: l.refund / l.qty })),
+    subtotal: ret.refundTotal,
+    shipping: 0,
+    total: ret.refundTotal,
+    source: "pos",
+    paymentMethod: ret.refundMethod,
+    cashAmount: ret.cashRefund,
+    cardAmount: ret.cardRefund,
+    storeLine: posStoreLine(ret),
+    isRefund: true,
+    refundOf: ret.orderNumber,
   };
 }
 
@@ -105,7 +131,7 @@ export function ReceiptPreview({
     };
   }, [data, lang]);
 
-  const title = `${data.source === "pos" ? t("admin.receipt.receiptTitle") : t("admin.receipt.invoiceTitle")} ${orderNumber}`;
+  const title = `${data.isRefund ? t("pos.returns.refundReceipt") : data.source === "pos" ? t("admin.receipt.receiptTitle") : t("admin.receipt.invoiceTitle")} ${orderNumber}`;
 
   return (
     <div className="flex flex-col items-center gap-4">

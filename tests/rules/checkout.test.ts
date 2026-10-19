@@ -1,5 +1,5 @@
 import { assertFails, assertSucceeds } from "./testing";
-import { doc, getDoc, runTransaction, setDoc, updateDoc } from "../../src/db/firestore";
+import { collection, doc, getDoc, getDocs, query, runTransaction, setDoc, updateDoc, where } from "../../src/db/firestore";
 import type { Firestore } from "../../src/db/firestore";
 import { afterAll, beforeEach, describe, it } from "vitest";
 import { clearFirestore, getTestEnv, teardownTestEnv } from "./setup";
@@ -640,7 +640,10 @@ describe("checkout: order read access", () => {
     await assertSucceeds(getDoc(doc(cashier.firestore(), "orders/order3m")));
   });
 
-  it("lets a cashier read their own branch's POS sales but not another branch's", async () => {
+  // In-store returns (posReturn.ts) take back a sale made at another branch,
+  // so a cashier can open any POS sale by its id -- but can only LIST their
+  // own branch's (see pos-branches.test.ts / pos-returns.test.ts).
+  it("lets a cashier read their own branch's POS sales, and another branch's only by id", async () => {
     await seedBranchSetup({ uid: "cashier4" });
     const env = await getTestEnv();
     await env.withSecurityRulesDisabled(async (ctx) => {
@@ -650,8 +653,9 @@ describe("checkout: order read access", () => {
     });
     const fs = env.authenticatedContext("cashier4", IDENTIFIED).firestore();
     await assertSucceeds(getDoc(doc(fs, "orders/pos-b1")));
-    await assertFails(getDoc(doc(fs, "orders/pos-b2")));
-    await assertFails(getDoc(doc(fs, "orders/pos-legacy")));
+    await assertSucceeds(getDoc(doc(fs, "orders/pos-b2")));
+    await assertSucceeds(getDoc(doc(fs, "orders/pos-legacy")));
+    await assertFails(getDocs(query(collection(fs, "orders"), where("branchId", "==", "b2"))));
   });
 
   // Was blocked ("catalog-scoped, never orders") until editor was added to

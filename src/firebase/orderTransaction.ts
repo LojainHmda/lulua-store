@@ -1,9 +1,10 @@
-import { collection, deleteDoc, doc, runTransaction, serverTimestamp } from "../db/firestore";
+import { collection, deleteDoc, doc, getDocs, query, runTransaction, serverTimestamp, Timestamp, where } from "../db/firestore";
 import { notifyLowStock } from "../admin/lowStockNotify";
 import { normalizeProduct, stockCellKey, toStockByCell } from "../admin/productVariants";
 import { computeStockDeltas } from "../admin/stockMovements";
-import type { AdminColorVariant, AdminDiscount, AdminProduct, BranchStockDoc, DeliveryZone, OrderLine, OrderStatus, PaymentMethod, RegisterSession, ShippingSettingsDoc } from "../admin/types";
+import type { AdminColorVariant, AdminDiscount, AdminOrder, AdminProduct, BranchStockDoc, DeliveryZone, OrderLine, OrderStatus, PaymentMethod, RegisterSession, ShippingSettingsDoc } from "../admin/types";
 import { resolveDeliveryFee, SHIPPING_DEFAULTS } from "../data/deliveryZones";
+import { applyPromotions, toPromotionDef, type PromoResult, type PromotionDef } from "../data/promotions";
 import { auth } from "./auth";
 import { branchStockId, withBranchStock } from "./branchStock";
 import { db } from "./config";
@@ -43,6 +44,23 @@ export interface PlaceOrderInput {
   // privilege, unrelated to the discount-code system entirely. Never used
   // for a web checkout; see discountId below for that path.
   discount?: number;
+  // POS only: the manual discount was entered as this percentage (shown on
+  // the receipt/reports); the amount above is what was actually taken off.
+  discountPercent?: number;
+  // POS only: the promotion total the cashier's screen showed. Promotions
+  // are re-worked here on the real prices; if they no longer come to this
+  // (a promotion was edited/ended meanwhile) nothing is written.
+  expectedPromoDiscount?: number;
+  // POS: the sale's id/number chosen by the till before charging. Makes the
+  // sale idempotent: if an order with this id already exists (a retry, or an
+  // offline sale whose first send did go through) it is returned as-is.
+  orderId?: string;
+  orderNumber?: string;
+  // POS: a sale made while the till was offline, being sent now. It already
+  // happened -- the customer paid and left with the goods -- so it's
+  // recorded as charged: at the prices and promotions of that moment, even
+  // if that leaves branch stock short (flagged on the order for review).
+  offline?: { createdAt: number; linePrices: Record<string, number> };
   // Web checkout only: the discounts/{id} a customer applied at Checkout
   // (src/pages/Checkout.tsx). The actual discount amount is re-derived
   // authoritatively from this doc inside the transaction below, never
@@ -66,9 +84,29 @@ export interface PlaceOrderResult {
   orderId: string;
   orderNumber: string;
   total: number;
+  // Already recorded by an earlier attempt (same orderId).
+  alreadyRecorded?: boolean;
+  // Offline sales only: units sold beyond the branch's stock.
+  stockShortage?: StockShortage[];
+}
+
+export interface StockShortage {
+  productId: string;
+  variantId: string;
+  size: string;
+  name: string;
+  short: number;
 }
 
 export class PlaceOrderError extends Error {}
+// The sale's promotions changed between the screen and the sale.
+export class PromotionsChangedError extends PlaceOrderError {}
+
+// Live promotions for a POS sale -- read fresh right before the transaction.
+async function loadActivePromotions(): Promise<PromotionDef[]> {
+  const snap = await getDocs(query(collection(db, "promotions"), where("active", "==", true)));
+  return snap.docs.map((d) => toPromotionDef(d.id, d.data()));
+}
 
 interface ClaimLine {
   productId: string;
@@ -105,7 +143,8 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
   }
   const uid = user.uid;
   const claimRef = doc(db, "checkoutClaims", uid);
-  const orderRef = doc(collection(db, "orders"));
+  const orderRef = input.orderId ? doc(db, "orders", input.orderId) : doc(collection(db, "orders"));
+  const offline = isPos ? input.offline : undefined;
   const deliveryZoneRef = !isPos && input.deliveryZoneId ? doc(db, "deliveryZones", input.deliveryZoneId) : null;
   const customerId = input.customerId ?? (isPos ? undefined : uid);
   const customerRef = customerId ? doc(db, "customers", customerId) : null;
@@ -129,12 +168,21 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
   // that was never actually committed, once with the real one.
   let stockChanges: { product: { id: string; name: string }; before: AdminProduct["colorVariants"]; after: AdminColorVariant[] }[] = [];
 
+  const promotions = isPos ? await loadActivePromotions() : [];
+
   const result = await runTransaction(db, async (tx) => {
     // Reset on every attempt, including retries — Firestore replays this
     // whole callback from scratch on a write-conflict retry, and this array
     // is read from OUTSIDE the callback after commit, so it must never hold
     // a mix of a discarded attempt's entries and the real one's.
     stockChanges = [];
+    if (input.orderId) {
+      const existing = await tx.get(orderRef);
+      if (existing.exists()) {
+        const d = existing.data() as AdminOrder;
+        return { orderId: orderRef.id, orderNumber: d.orderNumber, total: d.total, alreadyRecorded: true, stockShortage: d.stockShortage };
+      }
+    }
     const sessionSnap = sessionRef ? await tx.get(sessionRef) : null;
     // Multi-branch POS: a sale on a branch register sells from THAT branch's
     // stock (branchStock/{branchId}__{productId}), never from the online
@@ -168,11 +216,13 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
 
     const claimLines: ClaimLine[] = [];
     const orderLines: OrderLine[] = [];
+    const stockShortage: StockShortage[] = [];
     let subtotal = 0;
 
     for (const line of input.lines) {
       const product = productById.get(line.productId);
-      if (!product || product.status !== "active") {
+      // An offline sale already happened: a product archived since still counts.
+      if (!product || (product.status !== "active" && !offline)) {
         throw new PlaceOrderError(`${product?.name ?? "An item"} in your bag is no longer available.`);
       }
       const variant = product.colorVariants.find((v) => v.id === line.variantId);
@@ -186,10 +236,14 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       // or as unlimited (would let this sell with no real stock backing
       // it). Refuse the sale explicitly instead, for both web checkout and
       // POS (this function is shared by both — see PlaceOrderInput.source).
-      if (stockEntry.qty === null) {
+      if (offline) {
+        // Recorded as sold whatever the count says now; any shortfall is
+        // flagged on the order for a stock review instead of losing the sale.
+        const have = stockEntry.qty ?? 0;
+        if (have < line.qty) stockShortage.push({ productId: line.productId, variantId: line.variantId, size: line.size, name: product.name, short: line.qty - Math.max(0, have) });
+      } else if (stockEntry.qty === null) {
         throw new PlaceOrderError(`${product.name} (${variant.colorName}, ${line.size}) needs its stock count confirmed before it can be sold.`);
-      }
-      if (stockEntry.qty < line.qty) {
+      } else if (stockEntry.qty < line.qty) {
         throw new PlaceOrderError(
           branchId
             ? `${product.name} (${variant.colorName}, ${line.size}) doesn't have enough stock at this branch (${stockEntry.qty} left).`
@@ -197,14 +251,16 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
         );
       }
 
-      subtotal += product.price * line.qty;
-      claimLines.push({ productId: line.productId, variantId: line.variantId, size: line.size, qty: line.qty, price: product.price });
+      // Offline: the price the customer was charged at the till.
+      const price = offline?.linePrices[`${line.productId}::${line.variantId}::${line.size}`] ?? product.price;
+      subtotal += price * line.qty;
+      claimLines.push({ productId: line.productId, variantId: line.variantId, size: line.size, qty: line.qty, price });
       orderLines.push({
         productId: line.productId,
         variantId: line.variantId,
         name: product.name,
         qty: line.qty,
-        price: product.price,
+        price,
         size: line.size,
         color: variant.colorName,
         imageId: variant.imageId,
@@ -254,12 +310,38 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       }
       const rawAmount = d.type === "percent" ? subtotal * (d.value / 100) : d.value;
       discount = Math.min(rawAmount, subtotal);
-    } else if (isPos) {
-      discount = Math.min(input.discount ?? 0, subtotal);
     }
-    const total = subtotal - discount + shipping;
 
-    tx.set(claimRef, { lines: claimLines });
+    // POS: automatic promotions first (same calculator the till and the rules
+    // use), then the cashier's manual discount on what's left.
+    let promo: PromoResult | null = null;
+    let manualDiscount = 0;
+    if (isPos) {
+      promo = applyPromotions(
+        orderLines.map((l) => ({ key: `${l.productId}::${l.variantId}::${l.size}`, productId: l.productId, category: productById.get(l.productId)?.category ?? "", price: l.price, qty: l.qty })),
+        promotions,
+        // Offline: the promotions as they stood when the sale was made.
+        { branchId, now: offline?.createdAt ?? Date.now() }
+      );
+      if (input.expectedPromoDiscount !== undefined && Math.abs(promo.total - input.expectedPromoDiscount) > 0.005) {
+        throw new PromotionsChangedError("The promotions on this sale changed. Check the total and charge again.");
+      }
+      for (const l of orderLines) {
+        const hit = promo.lines[`${l.productId}::${l.variantId}::${l.size}`];
+        if (hit && hit.discount > 0) {
+          l.promoDiscount = hit.discount;
+          l.promotionId = hit.promotionId;
+          l.promotionName = hit.promotionName;
+        }
+      }
+      manualDiscount = Math.round(Math.max(0, Math.min(input.discount ?? 0, subtotal - promo.total)) * 100) / 100;
+      discount = Math.round((promo.total + manualDiscount) * 100) / 100;
+    }
+    const total = Math.round((subtotal - discount + shipping) * 100) / 100;
+
+    // `offline` lets this claim take branch stock below zero (rules:
+    // stockDecreaseMatchesClaimFlat) -- the units are already gone.
+    tx.set(claimRef, offline ? { lines: claimLines, offline: true } : { lines: claimLines });
 
     // Collected here (a plain local, naturally fresh on every transaction
     // attempt, same as the stockChanges reset above) and written as
@@ -281,7 +363,7 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
         const after = { ...before };
         for (const l of claimLines.filter((c) => c.productId === productId)) {
           const key = stockCellKey(l.variantId, l.size);
-          const qtyBefore = after[key].qty as number;
+          const qtyBefore = (after[key].qty as number | null) ?? 0;
           after[key] = { ...after[key], qty: qtyBefore - l.qty };
           const variant = product.colorVariants.find((v) => v.id === l.variantId)!;
           pendingMovements.push({ productId, productName: product.name, variantId: l.variantId, colorName: variant.colorName, size: l.size, qtyBefore, qtyChange: -l.qty, qtyAfter: qtyBefore - l.qty });
@@ -329,7 +411,7 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
     // "web"` -- see PlaceOrderInput's own doc comment.
     const cashierName = session?.cashierName;
 
-    const orderNumber = `SIS-${Date.now().toString(36).toUpperCase()}`;
+    const orderNumber = input.orderNumber ?? `SIS-${Date.now().toString(36).toUpperCase()}`;
     tx.set(orderRef, {
       orderNumber,
       customerId,
@@ -340,6 +422,14 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       subtotal,
       discount,
       discountId: input.discountId,
+      // POS: a discount here can only be a manual one (typed in at the till,
+      // within the user's limit -- see isValidCashierDiscount in the rules).
+      discountSource:
+        isPos && discount > 0 ? (promo && promo.total > 0 ? (manualDiscount > 0 ? "mixed" : "promotion") : "manual") : undefined,
+      discountPercent: isPos && manualDiscount > 0 ? input.discountPercent : undefined,
+      manualDiscount: isPos && manualDiscount > 0 ? manualDiscount : undefined,
+      promoDiscount: promo && promo.total > 0 ? promo.total : undefined,
+      promotions: promo && promo.applied.length > 0 ? promo.applied : undefined,
       shipping,
       total,
       status: input.status ?? "pending",
@@ -372,13 +462,18 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       // Phase A: the cashier who rang this specific sale, directly on the
       // order itself -- undefined (dropped by ignoreUndefinedProperties)
       // for a web checkout or any non-POS source.
+      // Offline: made at the till at offlineCreatedAt, sent at syncedAt.
+      offline: offline ? true : undefined,
+      offlineCreatedAt: offline ? Timestamp.fromMillis(offline.createdAt) : undefined,
+      syncedAt: offline ? serverTimestamp() : undefined,
+      stockShortage: offline && stockShortage.length > 0 ? stockShortage : undefined,
       cashierUid: isPos ? user.uid : undefined,
       cashierEmail: isPos ? (user.email ?? undefined) : undefined,
       cashierName: isPos ? (cashierName ?? user.displayName ?? undefined) : undefined,
       // On a POS device the signed-in identity is the till; the real staff
       // member who started the shift comes from the session.
       operatorId: isPos ? session?.operatorId : undefined,
-      createdAt: serverTimestamp(),
+      createdAt: offline ? Timestamp.fromMillis(offline.createdAt) : serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
 
@@ -428,7 +523,7 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
       });
     }
 
-    return { orderId: orderRef.id, orderNumber, total };
+    return { orderId: orderRef.id, orderNumber, total, stockShortage: stockShortage.length > 0 ? stockShortage : undefined };
   });
 
   // Best-effort cleanup — the claim is a singleton per user that the next

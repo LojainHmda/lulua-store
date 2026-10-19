@@ -1,12 +1,13 @@
-import { collection, onSnapshot, query, where } from "../db/firestore";
+import { collection, doc, onSnapshot, query, where } from "../db/firestore";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAdminAuth } from "../admin/AdminAuthContext";
 import AdminIcon from "../admin/components/AdminIcons";
+import { ConfirmDialog, Modal } from "../admin/components/Modal";
 import { resolveImageSrc } from "../admin/imageSrc";
 import { logActivity } from "../admin/logActivity";
 import { normalizeProduct, totalStock } from "../admin/productVariants";
 import { matchProductFromScan } from "../admin/scanProductMatch";
-import type { AdminCategory, AdminProduct, Branch, BranchStockDoc, PaymentMethod, RegisterSession } from "../admin/types";
+import type { AdminCategory, AdminProduct, Branch, BranchStockDoc, HeldSale, PaymentMethod, PosDiscountPolicyDoc, RegisterSession } from "../admin/types";
 import { useLanguage } from "../context/LanguageContext";
 import { subtreeSlugs, visibleCategories } from "../data/categoryTree";
 import { localizedName } from "../data/localize";
@@ -14,7 +15,7 @@ import { isSellable, resolveSellability } from "../data/sellability";
 import { subscribeBranchStock, withBranchStock } from "../firebase/branchStock";
 import { branchesApi, categoriesApi } from "../firebase/collections";
 import { db } from "../firebase/config";
-import { MAX_CHECKOUT_LINES, placeOrder, PlaceOrderError } from "../firebase/orderTransaction";
+import { MAX_CHECKOUT_LINES, placeOrder, PlaceOrderError, PromotionsChangedError } from "../firebase/orderTransaction";
 import { posStoreLine, ReceiptPreview } from "../receipts/ReceiptPreview";
 import type { ReceiptData } from "../receipts/renderReceipt";
 import { CameraScannerModal } from "./CameraScannerModal";
@@ -22,14 +23,22 @@ import { CategoryRail, tintStyle, useCategoryColors, useSubtreeCounts } from "./
 import { resolveCategoryIcon } from "../components/ui/CategoryIcons";
 import { ProductPicker, type PickedLine } from "./ProductPicker";
 import { useBarcodeScanner } from "./useBarcodeScanner";
+import { useOffline } from "./offline/OfflineContext";
+import { pendingQtyByCell } from "./offline/offlineStore";
 import { formatPrice } from "../utils/currency";
 import { NumberInput, type NumericValue } from "../components/ui/NumberInput";
+import { barcodeDataUrl } from "../hooks/useBarcodeImage";
+import { discountNote, manualDiscount, POS_DISCOUNT_POLICY_DEFAULTS, type ManualDiscountMode } from "../admin/posDiscounts";
+import { subscribeSingletonDoc } from "../firebase/firestore";
+import { discardHeldSale, HeldSaleError, heldSaleExpired, holdSale, resumeHeldSale, subscribeHeldSales } from "../firebase/heldSales";
+import { applyPromotions, promotionHints, toPromotionDef, type PromotionDef } from "../data/promotions";
 
 type CartLine = PickedLine & { key: string };
 
 // Remembered per device: a till that habitually rings big baskets keeps the
 // sale panel wide.
 const SALE_EXPANDED_KEY = "lulua-pos-sale-expanded";
+const CART_KEY_PREFIX = "lulua-pos-cart:";
 
 function lineKey(productId: string, variantId: string, size: string): string {
   return `${productId}::${variantId}::${size}`;
@@ -57,18 +66,40 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
   // Category rail selection: the doc id of the category whose products are
   // listed (everything under it), null = all products.
   const [categoryId, setCategoryId] = useState<string | null>(null);
-  const [cart, setCart] = useState<CartLine[]>([]);
+  // The unfinished sale survives switching to Returns / Today's sales and
+  // back (this screen unmounts) and a page refresh: kept per shift in this
+  // tab's sessionStorage. Prices/stock are re-checked when the sale completes.
+  const cartKey = `${CART_KEY_PREFIX}${session.id}`;
+  const [cart, setCart] = useState<CartLine[]>(() => {
+    try {
+      const saved = JSON.parse(window.sessionStorage.getItem(cartKey) ?? "[]");
+      return Array.isArray(saved) ? (saved as CartLine[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try {
+      if (cart.length > 0) window.sessionStorage.setItem(cartKey, JSON.stringify(cart));
+      else window.sessionStorage.removeItem(cartKey);
+    } catch {
+      // Storage unavailable: the cart just isn't kept across screens.
+    }
+  }, [cart, cartKey]);
   const [pickerProduct, setPickerProduct] = useState<AdminProduct | null>(null);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanMessage, setScanMessage] = useState<string | null>(null);
   const [discountInput, setDiscountInput] = useState<NumericValue>(null);
+  // Manual discount entered as a percentage of the sale or a ₪ amount.
+  const [discountMode, setDiscountMode] = useState<ManualDiscountMode>("percent");
+  const [discountPolicy, setDiscountPolicy] = useState<PosDiscountPolicyDoc>(POS_DISCOUNT_POLICY_DEFAULTS);
   const [paying, setPaying] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
   const [cashTendered, setCashTendered] = useState<NumericValue>(null);
   const [splitCard, setSplitCard] = useState<NumericValue>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [receipt, setReceipt] = useState<{ orderNumber: string; data: ReceiptData; paid: number; change: number } | null>(null);
+  const [receipt, setReceipt] = useState<{ orderNumber: string; data: ReceiptData; paid: number; change: number; offline?: boolean } | null>(null);
   const [printBlocked, setPrintBlocked] = useState(false);
   const [cartOpen, setCartOpen] = useState(false);
   const [saleExpanded, setSaleExpanded] = useState(() => {
@@ -119,9 +150,29 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
   // A session opened on a branch register sells from that branch's stock.
   // (A session from before branches existed keeps selling online stock.)
   const branchId = session.branchId;
-  // POS discounts are owner/admin-only -- firestore.rules rejects a
-  // cashier's sale that carries one, this just keeps the control away.
-  const canDiscount = hasRole(["owner", "admin"]);
+  // Manual discounts: owner/admin without limit; a cashier up to the
+  // configured % of the sale (settings/posDiscounts; 0 = not allowed). The
+  // rules enforce the same limit on the sale itself.
+  useEffect(() => subscribeSingletonDoc<PosDiscountPolicyDoc>("settings", "posDiscounts", (d) => setDiscountPolicy({ ...POS_DISCOUNT_POLICY_DEFAULTS, ...d })), []);
+
+  // Automatic promotions (Admin → Discounts → Promotions), live. The clock
+  // ticks each minute so a promotion starts/ends on an open till too.
+  const [promotions, setPromotions] = useState<PromotionDef[]>([]);
+  const [promoClock, setPromoClock] = useState(() => Date.now());
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(collection(db, "promotions"), where("active", "==", true)),
+      (snap) => setPromotions(snap.docs.map((d) => toPromotionDef(d.id, d.data()))),
+      () => setPromotions([])
+    );
+    const timer = setInterval(() => setPromoClock(Date.now()), 60_000);
+    return () => {
+      unsub();
+      clearInterval(timer);
+    };
+  }, []);
+  const maxDiscountPercent = hasRole(["owner", "admin"]) ? 100 : discountPolicy.cashierMaxPercent;
+  const canDiscount = maxDiscountPercent > 0;
 
   useEffect(() => {
     const unsub = onSnapshot(query(collection(db, "products"), where("status", "==", "active")), (snap) => {
@@ -155,9 +206,26 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
   }, [branchId]);
 
   // Products as this till sees them: with this branch's own counts.
+  // Offline sales not sent yet already took their units: the till shows the
+  // branch stock minus those, so it never sells the same units twice.
+  const { online, markOffline, addPending, sales: offlineSales } = useOffline();
+  const pendingByCell = useMemo(() => pendingQtyByCell(offlineSales, branchId), [offlineSales, branchId]);
   const tillProducts = useMemo(
-    () => (branchId ? products.map((p) => withBranchStock(p, branchStock.get(p.id))) : products),
-    [products, branchStock, branchId]
+    () =>
+      branchId
+        ? products.map((p) => {
+            const withStock = withBranchStock(p, branchStock.get(p.id));
+            if (pendingByCell.size === 0) return withStock;
+            return {
+              ...withStock,
+              colorVariants: withStock.colorVariants.map((v) => ({
+                ...v,
+                sizeStock: v.sizeStock.map((s) => (s.qty === null ? s : { ...s, qty: s.qty - (pendingByCell.get(`${p.id}::${v.id}::${s.size}`) ?? 0) })),
+              })),
+            };
+          })
+        : products,
+    [products, branchStock, branchId, pendingByCell]
   );
 
   // The one sellability rule (src/data/sellability.ts), shared with the
@@ -284,9 +352,44 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
   useBarcodeScanner(handleScan);
 
   const subtotal = useMemo(() => cart.reduce((sum, l) => sum + l.price * l.qty, 0), [cart]);
-  const discount = canDiscount ? Math.max(0, Math.min(discountInput ?? 0, subtotal)) : 0;
-  const total = Math.round((subtotal - discount) * 100) / 100;
+  // Promotions first (shared calculator), then the manual discount on what's left.
+  const promo = useMemo(
+    () =>
+      applyPromotions(
+        cart.map((l) => ({ key: l.key, productId: l.productId, category: products.find((p) => p.id === l.productId)?.category ?? "", price: l.price, qty: l.qty })),
+        promotions,
+        { branchId, now: promoClock }
+      ),
+    [cart, products, promotions, branchId, promoClock]
+  );
+  const promoTotal = promo.total;
+  // "Add 1 more to get 1 free": multi-item deals the cart is short of.
+  const promoHints = useMemo(
+    () =>
+      promotionHints(
+        cart.map((l) => ({ key: l.key, productId: l.productId, category: products.find((p) => p.id === l.productId)?.category ?? "", price: l.price, qty: l.qty })),
+        promotions,
+        { branchId, now: promoClock },
+        promo
+      ),
+    [cart, products, promotions, branchId, promoClock, promo]
+  );
+  const hintText = (h: (typeof promoHints)[number]) =>
+    h.type === "bundle"
+      ? t("pos.promo.hintBundle").replace("{name}", h.promotionName).replace("{need}", String(h.need))
+      : (h.percent >= 100 ? t("pos.promo.hintFree") : t("pos.promo.hintOff").replace("{p}", String(h.percent)))
+          .replace("{name}", h.promotionName)
+          .replace("{need}", String(h.need))
+          .replace("{free}", String(h.free));
+  const manual = manualDiscount(Math.round((subtotal - promoTotal) * 100) / 100, discountMode, canDiscount ? discountInput : null, maxDiscountPercent);
+  const discount = manual.amount;
+  const discountLabelNote = discount > 0 ? discountNote(discountMode, discountInput) : "";
+  const total = Math.round((subtotal - promoTotal - discount) * 100) / 100;
   const tendered = cashTendered ?? 0;
+  useEffect(() => {
+    setCashTendered(null);
+    setSplitCard(null);
+  }, [discount, promoTotal]);
   const splitCardAmount = splitCard ?? 0;
   const splitCashAmount = Math.max(0, total - splitCardAmount);
   // The `max` attribute on the card input is only a browser hint — typing or
@@ -300,11 +403,13 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
   const paid = paymentMethod === "cash" ? tendered : total;
   const change = Math.max(0, paid - total);
   const canComplete =
-    !submitting && cart.length > 0 && (paymentMethod === "cash" ? cashTendered !== null && tendered >= total : paymentMethod === "split" ? splitBalanced : true);
+    !submitting && cart.length > 0 && !manual.error && (paymentMethod === "cash" ? cashTendered !== null && tendered >= total : paymentMethod === "split" ? splitBalanced : true);
 
   function resetSale() {
+    saleIdRef.current = null;
     setCart([]);
     setDiscountInput(null);
+    setDiscountMode("percent");
     setPaying(false);
     setPaymentMethod("cash");
     setCashTendered(null);
@@ -318,53 +423,270 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
     setTimeout(() => searchRef.current?.focus(), 0);
   }
 
+  // Clear cart: one unit goes straight away; two or more ask first (a mis-tap
+  // on a big basket is costly). Only the unfinished sale is touched -- no
+  // stock or sale record exists yet -- and the clear is logged.
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  // ---- Hold / park ------------------------------------------------------------
+  // The branch's held sales (any till of the branch can resume them).
+  const [heldSales, setHeldSales] = useState<HeldSale[]>([]);
+  useEffect(() => (branchId ? subscribeHeldSales(db, branchId, setHeldSales) : undefined), [branchId]);
+  const [holding, setHolding] = useState(false);
+  const [heldListOpen, setHeldListOpen] = useState(false);
+  const [discardTarget, setDiscardTarget] = useState<HeldSale | null>(null);
+  // What changed on a resumed sale (prices, stock, removed items).
+  const [resumeNotes, setResumeNotes] = useState<{ ref: string; notes: string[] } | null>(null);
+  const [heldError, setHeldError] = useState<string | null>(null);
+  const actorName = profile?.posLink ? session.cashierName : (profile?.displayName ?? session.cashierName);
+
+  async function holdCurrentSale(): Promise<boolean> {
+    if (!profile || cart.length === 0) return false;
+    setHolding(true);
+    setHeldError(null);
+    try {
+      const held = await holdSale(
+        db,
+        session,
+        { uid: profile.id, name: actorName },
+        {
+          lines: cart.map((l) => ({ productId: l.productId, variantId: l.variantId, size: l.size, qty: l.qty, name: l.name, color: l.color, price: l.price, imageId: l.imageId, imageUrl: l.imageUrl })),
+          discountMode,
+          discountValue: discountInput,
+        }
+      );
+      void logActivity({ id: profile.id, email: profile.email, displayName: actorName }, "pos.saleHeld", held.ref, `${held.itemCount} · ${formatPrice(held.subtotal)}`);
+      resetSale();
+      flash(t("pos.hold.heldAs").replace("{ref}", held.ref));
+      return true;
+    } catch {
+      setHeldError(t("pos.hold.failed"));
+      flash(t("pos.hold.failed"));
+      return false;
+    } finally {
+      setHolding(false);
+    }
+  }
+
+  function heldErrorText(err: unknown): string {
+    if (err instanceof HeldSaleError) {
+      if (err.code === "taken") return t("pos.hold.taken").replace("{name}", err.by ?? "—");
+      return t(`pos.hold.${err.code}`);
+    }
+    return t("pos.hold.failed");
+  }
+
+  async function resumeHeld(h: HeldSale) {
+    if (!profile) return;
+    // A sale already going on this till is held first (never overwritten),
+    // then the chosen one opens -- no extra question.
+    if (cart.length > 0 && !(await holdCurrentSale())) return;
+    await resumeHeldNow(h);
+  }
+
+  async function resumeHeldNow(h: HeldSale) {
+    if (!profile) return;
+    setHeldError(null);
+    try {
+      const got = await resumeHeldSale(db, h.id, session, { uid: profile.id, name: actorName });
+      // Today's prices and this till's stock, not the ones from when it was held.
+      const notes: string[] = [];
+      const next: CartLine[] = [];
+      for (const l of got.lines) {
+        const product = listedProducts.find((p) => p.id === l.productId);
+        const variant = product?.colorVariants.find((v) => v.id === l.variantId);
+        const cell = variant?.sizeStock.find((x) => x.size === l.size);
+        if (!product || !variant || !cell) {
+          notes.push(t("pos.hold.noteRemoved").replace("{name}", `${l.name} (${l.color} · ${l.size})`));
+          continue;
+        }
+        const available = stockFor(l.productId, l.variantId, l.size);
+        const qty = available === null ? l.qty : Math.min(l.qty, available);
+        if (qty <= 0) {
+          notes.push(t("pos.hold.noteOutOfStock").replace("{name}", `${l.name} (${l.color} · ${l.size})`));
+          continue;
+        }
+        if (qty < l.qty) notes.push(t("pos.hold.noteQty").replace("{name}", l.name).replace("{qty}", String(qty)).replace("{was}", String(l.qty)));
+        if (Math.abs(product.price - l.price) > 0.005)
+          notes.push(t("pos.hold.notePrice").replace("{name}", l.name).replace("{was}", formatPrice(l.price)).replace("{now}", formatPrice(product.price)));
+        next.push({ ...l, price: product.price, qty, key: lineKey(l.productId, l.variantId, l.size) });
+      }
+      setCart(next);
+      if (canDiscount && got.discountValue) {
+        setDiscountMode(got.discountMode ?? "percent");
+        setDiscountInput(got.discountValue);
+        setDiscountOpen(true);
+      }
+      setHeldListOpen(false);
+      void logActivity({ id: profile.id, email: profile.email, displayName: actorName }, "pos.saleResumed", got.ref, `${got.cashierName} · ${got.registerName ?? ""}`);
+      if (notes.length > 0) setResumeNotes({ ref: got.ref, notes });
+      else flash(t("pos.hold.resumed").replace("{ref}", got.ref));
+    } catch (err) {
+      setHeldError(heldErrorText(err));
+    }
+  }
+
+  // Used right after holding the current sale: the cart is empty by then,
+  // even if this render still sees the old one.
+  async function discardHeld(h: HeldSale) {
+    if (!profile) return;
+    setDiscardTarget(null);
+    try {
+      await discardHeldSale(db, h.id, { uid: profile.id, name: actorName });
+      void logActivity({ id: profile.id, email: profile.email, displayName: actorName }, "pos.heldSaleDiscarded", h.ref, `${h.itemCount} · ${formatPrice(h.subtotal)}`);
+    } catch (err) {
+      setHeldError(heldErrorText(err));
+    }
+  }
+  function requestClearCart() {
+    if (cart.length === 0 || paying || submitting) return;
+    if (cart.reduce((n, l) => n + l.qty, 0) >= 2) setConfirmClear(true);
+    else clearCart();
+  }
+  function clearCart() {
+    const units = cart.reduce((n, l) => n + l.qty, 0);
+    if (units > 0 && profile) {
+      const name = profile.posLink ? session.cashierName : profile.displayName;
+      void logActivity(
+        { id: profile.id, email: profile.email, displayName: name },
+        "pos.cartCleared",
+        `${session.branchCode ?? ""} · ${session.registerName ?? ""}`,
+        `${units} · ${formatPrice(total)}`
+      );
+    }
+    setConfirmClear(false);
+    resetSale();
+  }
+
+  // The id/number this sale will have -- chosen once per sale, so a retry or
+  // an offline sale sent later can never be recorded twice.
+  const saleIdRef = useRef<{ id: string; number: string } | null>(null);
+  function saleIdentity() {
+    if (!saleIdRef.current) saleIdRef.current = { id: doc(collection(db, "orders")).id, number: `SIS-${Date.now().toString(36).toUpperCase()}` };
+    return saleIdRef.current;
+  }
+
+  function receiptFor(orderNumber: string, total: number, cashAmount: number, cardAmount: number, isOffline: boolean): ReceiptData {
+    return {
+      // The sale number as a barcode, so the receipt can be scanned back in
+      // for a return (Returns screen).
+      orderBarcodeDataUrl: barcodeDataUrl(orderNumber) ?? undefined,
+      orderNumber,
+      createdAt: new Date(),
+      customerName: "Walk-in customer",
+      lines: cart.map((l) => ({ name: l.name, color: l.color, size: l.size, qty: l.qty, price: l.price })),
+      subtotal,
+      discount,
+      discountNote: discount > 0 ? [t("pos.discount.manual"), discountLabelNote].filter(Boolean).join(" ") : undefined,
+      promotions: promo.applied.map((a) => ({ name: a.name, amount: a.amount })),
+      shipping: 0,
+      total,
+      source: "pos",
+      paymentMethod,
+      cashAmount,
+      cardAmount,
+      storeLine: posStoreLine({ branchName: session.branchName, registerName: session.registerName, cashierName: session.cashierName || profile?.displayName }),
+      offline: isOffline || undefined,
+    };
+  }
+
+  // No connection: the sale is kept on this device (with the id it will
+  // have) and sent automatically when the till is back online.
+  async function completeOffline(cashAmount: number, cardAmount: number) {
+    const { id, number } = saleIdentity();
+    const data = receiptFor(number, total, cashAmount, cardAmount, true);
+    await addPending({
+      id,
+      orderNumber: number,
+      sessionId: session.id,
+      branchId: session.branchId ?? "",
+      registerId: session.registerId ?? "",
+      registerName: session.registerName,
+      cashierUid: profile?.id ?? "",
+      cashierName: session.cashierName,
+      createdAt: Date.now(),
+      input: {
+        lines: cart.map((l) => ({ productId: l.productId, variantId: l.variantId, size: l.size, qty: l.qty })),
+        discount,
+        discountPercent: discount > 0 && discountMode === "percent" ? (discountInput ?? undefined) : undefined,
+        expectedPromoDiscount: promoTotal,
+        paymentMethod,
+        cashAmount,
+        cardAmount,
+        linePrices: Object.fromEntries(cart.map((l) => [l.key, l.price])),
+      },
+      total,
+      itemCount: cart.reduce((n, l) => n + l.qty, 0),
+      receipt: { ...data, createdAt: data.createdAt.getTime() },
+      status: "pending",
+      attempts: 0,
+    });
+    setReceipt({ orderNumber: number, paid, change, data, offline: true });
+  }
+
   async function completeSale() {
     if (!canComplete) return;
     setSubmitting(true);
     setError(null);
+    const cashAmount = paymentMethod === "cash" ? total : paymentMethod === "split" ? splitCashAmount : 0;
+    const cardAmount = paymentMethod === "card" ? total : paymentMethod === "split" ? splitCardAmount : 0;
+    if (!online) {
+      try {
+        await completeOffline(cashAmount, cardAmount);
+      } catch {
+        setError(t("pos.offline.saveFailed"));
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
     try {
-      const cashAmount = paymentMethod === "cash" ? total : paymentMethod === "split" ? splitCashAmount : 0;
-      const cardAmount = paymentMethod === "card" ? total : paymentMethod === "split" ? splitCardAmount : 0;
+      const { id: orderId, number: orderNumber } = saleIdentity();
       const result = await placeOrder({
+        orderId,
+        orderNumber,
         lines: cart.map((l) => ({ productId: l.productId, variantId: l.variantId, size: l.size, qty: l.qty })),
         customerName: "Walk-in customer",
         customerEmail: "",
         source: "pos",
         status: "completed",
         discount,
+        discountPercent: discount > 0 && discountMode === "percent" ? (discountInput ?? undefined) : undefined,
+        expectedPromoDiscount: promoTotal,
         paymentMethod,
         cashAmount,
         cardAmount,
         registerSessionId: session.id,
       });
+      if (profile && discount > 0) {
+        const name = profile.posLink ? session.cashierName : profile.displayName;
+        void logActivity(
+          { id: profile.id, email: profile.email, displayName: name },
+          "pos.discountApplied",
+          `#${result.orderNumber}`,
+          `-${formatPrice(discount)}${discountLabelNote ? ` (${discountLabelNote})` : ""} · ${formatPrice(subtotal)}`
+        );
+      }
       // Phase A section 14: supplemental activity-log entry for the sale --
       // the order document's own cashierUid/cashierEmail/cashierName
       // (written inside placeOrder()'s transaction) remain the source of
       // truth regardless of whether this best-effort log write succeeds.
       if (profile) void logActivity(profile, "pos.saleCompleted", `#${result.orderNumber}`);
-      setReceipt({
-        orderNumber: result.orderNumber,
-        paid,
-        change,
-        data: {
-          orderNumber: result.orderNumber,
-          createdAt: new Date(),
-          customerName: "Walk-in customer",
-          lines: cart.map((l) => ({ name: l.name, color: l.color, size: l.size, qty: l.qty, price: l.price })),
-          subtotal,
-          discount,
-          shipping: 0,
-          total: result.total,
-          source: "pos",
-          paymentMethod,
-          cashAmount,
-          cardAmount,
-          storeLine: posStoreLine({ branchName: session.branchName, registerName: session.registerName, cashierName: session.cashierName || profile?.displayName }),
-        },
-      });
+      setReceipt({ orderNumber: result.orderNumber, paid, change, data: receiptFor(result.orderNumber, result.total, cashAmount, cardAmount, false) });
       onSessionUpdate();
     } catch (err) {
-      setError(err instanceof PlaceOrderError ? err.message : t("pos.terminal.saleFailed"));
+      // The connection dropped mid-sale: keep it on the device. If the server
+      // did get it, sending it again finds it (same id) and records nothing new.
+      if ((err as { code?: string })?.code === "unavailable") {
+        markOffline();
+        try {
+          await completeOffline(cashAmount, cardAmount);
+        } catch {
+          setError(t("pos.offline.saveFailed"));
+        }
+      } else {
+        setError(err instanceof PromotionsChangedError ? t("pos.promo.changed") : err instanceof PlaceOrderError ? err.message : t("pos.terminal.saleFailed"));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -374,6 +696,9 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
     return (
       <div className="flex h-full flex-col items-center justify-center gap-5 overflow-y-auto p-8 text-center">
         <h2 className="font-display text-3xl font-bold text-ink">{t("pos.terminal.saleComplete")}</h2>
+        {receipt.offline && (
+          <p className="max-w-md rounded-lg bg-sand px-3 py-2 text-sm font-semibold text-wine-dark">{t("pos.offline.savedOnDevice").replace("{ref}", receipt.orderNumber)}</p>
+        )}
         <div className="grid w-full max-w-md grid-cols-3 gap-2">
           <div className="rounded-xl bg-paper p-3 shadow-soft">
             <p className="text-xs font-semibold uppercase text-ink-faint">{t("admin.orders.colTotal")}</p>
@@ -430,6 +755,22 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
             aria-label={t("pos.terminal.scanQrCode")}
           >
             <AdminIcon name="barcode" className="h-5 w-5" />
+          </button>
+          {/* The branch's sales on hold. */}
+          <button
+            disabled={!online}
+            title={online ? undefined : t("pos.offline.onlineOnly")}
+            onClick={() => {
+              setHeldError(null);
+              setHeldListOpen(true);
+            }}
+            className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-sm font-semibold ${
+              heldSales.length > 0 ? "border-wine/50 bg-wine-light text-wine-dark" : "border-line text-ink-soft hover:bg-cream-dim"
+            }`}
+          >
+            <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden><rect x="5" y="4" width="3.5" height="12" rx="1" /><rect x="11.5" y="4" width="3.5" height="12" rx="1" /></svg>
+            <span className="hidden sm:inline">{t("pos.hold.heldSales")}</span>
+            {heldSales.length > 0 && <span className="rounded-full bg-wine px-1.5 text-xs font-bold text-on-accent">{heldSales.length}</span>}
           </button>
         </div>
         {scanMessage && <p className="bg-sand px-4 py-2 text-center text-sm font-semibold text-wine-dark md:col-start-2 md:row-start-2">{scanMessage}</p>}
@@ -507,8 +848,8 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
             : `transition-[width] duration-200 md:static md:z-auto md:shrink-0 ${saleExpanded ? "md:w-[26rem] lg:w-[34rem] xl:w-[40rem]" : "md:w-72 lg:w-80"}`
         }`}
       >
-        <div className={`flex items-center justify-between border-b border-line px-3 py-2.5 ${fullPad}`}>
-          <div className="flex items-center gap-2">
+        <div className={`flex items-center justify-between gap-2 border-b border-line px-3 py-2.5 ${fullPad}`}>
+          <div className="flex min-w-0 items-center gap-2">
             <button
               onClick={() => setCartOpen(false)}
               aria-label={t("pos.terminal.closeCart")}
@@ -518,13 +859,33 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
                 <path d="M12.5 4l-6 6 6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </button>
-            <h2 className="font-display text-base font-bold text-ink">{t("pos.terminal.currentSale")}</h2>
+            <h2 className="whitespace-nowrap font-display text-base font-bold text-ink">{t("pos.terminal.currentSale")}</h2>
             {itemCount > 0 && <span className="rounded-full bg-cream-dim px-2 py-0.5 text-xs font-bold text-ink-soft">{itemCount}</span>}
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
+            {/* Hold: put this sale aside and serve the next customer. */}
+            {cart.length > 0 && !paying && online && (
+              <button
+                // One tap: the sale goes straight to Held sales.
+                disabled={holding}
+                onClick={() => void holdCurrentSale()}
+                aria-label={t("pos.hold.hold")}
+                title={t("pos.hold.hold")}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-wine hover:bg-wine-light disabled:opacity-40"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden><rect x="5" y="4" width="3.5" height="12" rx="1" /><rect x="11.5" y="4" width="3.5" height="12" rx="1" /></svg>
+              </button>
+            )}
+            {/* Clear cart: an icon beside the panel's own icons, in the sale's
+                wine colour so it reads as an action on the sale, not the panel. */}
             {cart.length > 0 && !paying && (
-              <button onClick={resetSale} className="rounded-md px-2 py-1 text-sm font-semibold text-ink-faint hover:text-wine">
-                {t("admin.common.clear")}
+              <button
+                onClick={requestClearCart}
+                aria-label={t("pos.terminal.clearCart")}
+                title={t("pos.terminal.clearCart")}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-wine hover:bg-wine-light"
+              >
+                <AdminIcon name="trash" className="h-4 w-4" />
               </button>
             )}
             {/* Desktop only -- on phones the sale is already full-screen. */}
@@ -585,6 +946,12 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
                           {[l.color, l.size].filter(Boolean).join(" · ")}
                         </span>
                       </div>
+                      {promo.lines[l.key] && (
+                        <span className="mt-1 inline-flex max-w-full items-center gap-1 truncate rounded bg-olive-light px-1.5 py-px text-[10px] font-bold text-olive">
+                          <AdminIcon name="tag" className="h-3 w-3 shrink-0" />
+                          {promo.lines[l.key].promotionName} -{formatPrice(promo.lines[l.key].discount)}
+                        </span>
+                      )}
                     </div>
                     <div className="flex shrink-0 flex-col items-center">
                       <div dir="ltr" className="flex items-center overflow-hidden rounded-md border border-line bg-paper">
@@ -598,7 +965,16 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
                       </div>
                       {atMax && <span className="mt-0.5 text-[10px] font-semibold text-wine">{t("pos.branch.maxStock")}</span>}
                     </div>
-                    <span className={`shrink-0 text-end text-sm font-bold text-ink ${wideRows ? "w-24" : "w-20"}`}>{formatPrice(l.price * l.qty)}</span>
+                    <span className={`shrink-0 text-end text-sm font-bold text-ink ${wideRows ? "w-24" : "w-20"}`}>
+                      {promo.lines[l.key] ? (
+                        <>
+                          <span className="block text-[11px] font-normal text-ink-faint line-through">{formatPrice(l.price * l.qty)}</span>
+                          {formatPrice(l.price * l.qty - promo.lines[l.key].discount)}
+                        </>
+                      ) : (
+                        formatPrice(l.price * l.qty)
+                      )}
+                    </span>
                   </li>
                 );
               })}
@@ -608,56 +984,30 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
 
         {cart.length > 0 && (
           <div className={`border-t border-line p-3 ${fullPad}`}>
-                {canDiscount && !discountOpen && discount === 0 && (
-                  <button onClick={() => setDiscountOpen(true)} className="mb-2 text-sm font-semibold text-wine hover:underline">
-                    + {t("pos.branch.addDiscount")}
-                  </button>
-                )}
-                {canDiscount && (discountOpen || discount > 0) && (
-                  <div className="mb-3 flex flex-col gap-2">
-                    <label className="flex items-center justify-between gap-2 text-sm">
-                      <span className="font-semibold text-ink">{t("pos.terminal.discount")}</span>
-                      <NumberInput
-                        min={0}
-                        nullable
-                        value={discountInput}
-                        onChange={setDiscountInput}
-                        placeholder="0.00"
-                        className="w-28 rounded-lg border border-line px-3 py-1.5 text-end outline-none focus:border-wine"
-                      />
-                    </label>
-                    <div className="flex justify-end gap-1.5">
-                      {[5, 10, 15, 20].map((pct) => (
-                        <button
-                          key={pct}
-                          onClick={() => setDiscountInput(Math.round(subtotal * pct) / 100)}
-                          className="rounded-md border border-line px-2.5 py-1 text-xs font-semibold text-ink-soft hover:border-wine hover:text-wine"
-                        >
-                          {pct}%
-                        </button>
-                      ))}
-                      {discount > 0 && (
-                        <button
-                          onClick={() => {
-                            setDiscountInput(null);
-                            setDiscountOpen(false);
-                          }}
-                          className="rounded-md px-2 py-1 text-xs font-semibold text-ink-faint hover:text-wine"
-                        >
-                          ×
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
                 <div className="mb-3 flex flex-col gap-0.5 text-sm">
                   <div className="flex justify-between text-ink-soft">
                     <span>{t("admin.orderDetail.subtotal")}</span>
                     <span>{formatPrice(subtotal)}</span>
                   </div>
+                  {promoHints.map((h) => (
+                    <p key={h.promotionId} className="my-0.5 flex items-center gap-1.5 rounded-md border border-dashed border-olive/50 bg-olive-light px-2 py-1 text-xs font-semibold text-olive">
+                      <AdminIcon name="tag" className="h-3.5 w-3.5 shrink-0" />
+                      {hintText(h)}
+                    </p>
+                  ))}
+                  {promo.applied.map((a) => (
+                    <div key={a.id} className="flex justify-between text-olive">
+                      <span className="truncate">
+                        {t("pos.promo.label")}: {a.name}
+                      </span>
+                      <span className="shrink-0">-{formatPrice(a.amount)}</span>
+                    </div>
+                  ))}
                   {discount > 0 && (
                     <div className="flex justify-between text-ink-soft">
-                      <span>{t("pos.terminal.discountLabel")}</span>
+                      <span>
+                        {t("pos.terminal.discountLabel")} <span className="text-xs text-ink-faint">({[t("pos.discount.manual"), discountLabelNote].filter(Boolean).join(" ")})</span>
+                      </span>
                       <span>-{formatPrice(discount)}</span>
                     </div>
                   )}
@@ -689,6 +1039,117 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
             onClick={(e) => e.stopPropagation()}
           >
               <div className="flex flex-col gap-3">
+                {/* Amount due: subtotal, the manual discount (added/edited right
+                    here, within this user's limit), total. */}
+                <div className="rounded-xl border border-line p-3 text-sm">
+                  <div className="flex justify-between text-ink-soft">
+                    <span>{t("admin.orderDetail.subtotal")}</span>
+                    <span>{formatPrice(subtotal)}</span>
+                  </div>
+                  {promo.applied.map((a) => (
+                    <div key={a.id} className="flex justify-between text-olive">
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="shrink-0 rounded bg-olive-light px-1.5 py-px text-[10px] font-bold uppercase">{t("pos.promo.label")}</span>
+                        <span className="truncate">{a.name}</span>
+                      </span>
+                      <span className="shrink-0">-{formatPrice(a.amount)}</span>
+                    </div>
+                  ))}
+                  {promoHints.map((h) => (
+                    <p key={h.promotionId} className="mt-1 flex items-center gap-1.5 rounded-md border border-dashed border-olive/50 bg-olive-light px-2 py-1 text-xs font-semibold text-olive">
+                      <AdminIcon name="tag" className="h-3.5 w-3.5 shrink-0" />
+                      {hintText(h)}
+                    </p>
+                  ))}
+                  {canDiscount && !discountOpen && discount === 0 && !manual.error && (
+                    <button onClick={() => setDiscountOpen(true)} className="mt-1 text-sm font-semibold text-wine hover:underline">
+                      + {t("pos.branch.addDiscount")}
+                    </button>
+                  )}
+                  {canDiscount && (discountOpen || discount > 0 || !!manual.error) && (
+                    <div className="mt-2 flex flex-col gap-1.5 rounded-lg bg-cream-dim/60 p-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-ink">{t("pos.terminal.discountLabel")}</span>
+                        <span className="rounded bg-paper px-1.5 py-px text-[10px] font-semibold uppercase text-ink-soft">{t("pos.discount.manual")}</span>
+                        <div className="ms-auto flex overflow-hidden rounded-md border border-line bg-paper text-xs font-semibold">
+                          {(["percent", "amount"] as ManualDiscountMode[]).map((m) => (
+                            <button
+                              key={m}
+                              onClick={() => {
+                                setDiscountMode(m);
+                                setDiscountInput(null);
+                              }}
+                              className={`px-2.5 py-1 ${discountMode === m ? "bg-wine text-on-accent" : "text-ink-soft"}`}
+                            >
+                              {m === "percent" ? "%" : "₪"}
+                            </button>
+                          ))}
+                        </div>
+                        <NumberInput
+                          min={0}
+                          nullable
+                          autoFocus
+                          value={discountInput}
+                          onChange={setDiscountInput}
+                          placeholder="0"
+                          className="w-20 rounded-md border border-line bg-paper px-2 py-1 text-end outline-none focus:border-wine"
+                        />
+                        <button
+                          onClick={() => {
+                            setDiscountInput(null);
+                            setDiscountOpen(false);
+                          }}
+                          aria-label={t("pos.discount.remove")}
+                          title={t("pos.discount.remove")}
+                          className="flex h-6 w-6 items-center justify-center rounded-full text-ink-faint hover:bg-paper hover:text-wine"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {[5, 10, 15, 20]
+                          .filter((pct) => pct <= maxDiscountPercent)
+                          .map((pct) => (
+                            <button
+                              key={pct}
+                              onClick={() => {
+                                setDiscountMode("percent");
+                                setDiscountInput(pct);
+                              }}
+                              className={`rounded-md border px-2 py-0.5 text-xs font-semibold ${
+                                discountMode === "percent" && discountInput === pct ? "border-wine bg-wine-light text-wine-dark" : "border-line bg-paper text-ink-soft hover:border-wine"
+                              }`}
+                            >
+                              {pct}%
+                            </button>
+                          ))}
+                        {maxDiscountPercent < 100 && (
+                          <span className="ms-auto text-[11px] text-ink-faint">
+                            {t("pos.discount.max").replace("{pct}", String(maxDiscountPercent)).replace("{amount}", formatPrice(manual.maxAmount))}
+                          </span>
+                        )}
+                      </div>
+                      {manual.error && (
+                        <p className="text-xs font-semibold text-wine">
+                          {t(`pos.discount.error.${manual.error}`).replace("{pct}", String(maxDiscountPercent)).replace("{amount}", formatPrice(manual.maxAmount))}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {discount > 0 && (
+                    <div className="mt-1 flex justify-between text-ink-soft">
+                      <span>
+                        {t("pos.terminal.discountLabel")} {discountLabelNote && <span className="text-xs text-ink-faint">({discountLabelNote})</span>}
+                      </span>
+                      <span>-{formatPrice(discount)}</span>
+                    </div>
+                  )}
+                  <div className="mt-1 flex justify-between border-t border-line pt-1 font-display text-lg font-bold text-ink">
+                    <span>{t("admin.orders.colTotal")}</span>
+                    <span>{formatPrice(total)}</span>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-3 gap-2">
                   {(["cash", "card", "split"] as PaymentMethod[]).map((m) => (
                     <button
@@ -818,6 +1279,91 @@ export default function Terminal({ session, onSessionUpdate }: { session: Regist
         />
       )}
       {scannerOpen && <CameraScannerModal onScan={handleScan} onClose={() => setScannerOpen(false)} />}
+      {/* The branch's held sales. */}
+      <Modal open={heldListOpen} onClose={() => setHeldListOpen(false)} title={`${t("pos.hold.heldSales")} · ${session.branchCode ?? session.branchName ?? ""}`} width="lg">
+        <div className="flex flex-col gap-2 text-sm">
+          {heldError && <p className="rounded-lg bg-wine-light px-3 py-2 font-semibold text-wine">{heldError}</p>}
+          {heldSales.length === 0 ? (
+            <p className="py-8 text-center text-ink-faint">{t("pos.hold.none")}</p>
+          ) : (
+            <ul className="divide-y divide-line overflow-hidden rounded-lg border border-line">
+              {heldSales.map((h) => {
+                const expired = heldSaleExpired(h);
+                const at = (h.createdAt as { toDate?: () => Date } | undefined)?.toDate?.();
+                return (
+                  <li key={h.id} className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 ${expired ? "opacity-70" : ""}`}>
+                    <div className="min-w-0 flex-1">
+                      <p className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-xs font-bold text-wine">{h.ref}</span>
+                        <span className="text-xs text-ink-faint">
+                          {at?.toLocaleTimeString(lang === "ar" ? "ar" : "en-US", { hour: "2-digit", minute: "2-digit" })} · {h.registerName} · {h.cashierName}
+                        </span>
+                        {expired && <span className="rounded bg-sand px-1.5 py-px text-[10px] font-bold uppercase text-wine-dark">{t("pos.hold.expiredTag")}</span>}
+                      </p>
+                      <p className="truncate text-ink">
+                        {h.customerName && <b className="me-1.5">{h.customerName}</b>}
+                        <span className="text-ink-soft">{h.lines.map((l) => `${l.name} ×${l.qty}`).join(", ")}</span>
+                      </p>
+                      {h.note && <p className="truncate text-xs text-ink-faint">{h.note}</p>}
+                    </div>
+                    <span className="shrink-0 font-bold text-ink">{formatPrice(h.subtotal)}</span>
+                    <div className="flex shrink-0 gap-1.5">
+                      <button
+                        onClick={() => setDiscardTarget(h)}
+                        className="rounded-full border border-line px-3 py-1.5 text-xs font-semibold text-ink-soft hover:border-wine hover:text-wine"
+                      >
+                        {t("pos.hold.discard")}
+                      </button>
+                      {!expired && (
+                        <button onClick={() => void resumeHeld(h)} className="rounded-full bg-wine px-3.5 py-1.5 text-xs font-semibold text-on-accent hover:bg-wine-dark">
+                          {t("pos.hold.resume")}
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <p className="text-xs text-ink-faint">{t("pos.hold.listHint")}</p>
+        </div>
+      </Modal>
+
+      {/* What changed on the resumed sale. */}
+      <Modal open={!!resumeNotes} onClose={() => setResumeNotes(null)} title={t("pos.hold.changedTitle").replace("{ref}", resumeNotes?.ref ?? "")} width="sm">
+        {resumeNotes && (
+          <div className="flex flex-col gap-3 text-sm">
+            <ul className="list-disc ps-5 text-ink">
+              {resumeNotes.notes.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+            <button autoFocus onClick={() => setResumeNotes(null)} className="self-end rounded-full bg-wine px-5 py-2 font-semibold text-on-accent hover:bg-wine-dark">
+              {t("admin.common.confirm")}
+            </button>
+          </div>
+        )}
+      </Modal>
+
+      <ConfirmDialog
+        open={!!discardTarget}
+        onClose={() => setDiscardTarget(null)}
+        onConfirm={() => discardTarget && void discardHeld(discardTarget)}
+        danger
+        title={t("pos.hold.discardTitle")}
+        body={t("pos.hold.discardBody").replace("{ref}", discardTarget?.ref ?? "").replace("{total}", formatPrice(discardTarget?.subtotal ?? 0))}
+        confirmLabel={t("pos.hold.discard")}
+      />
+
+      <ConfirmDialog
+        open={confirmClear}
+        onClose={() => setConfirmClear(false)}
+        onConfirm={clearCart}
+        danger
+        title={t("pos.terminal.clearCartTitle")}
+        body={t("pos.terminal.clearCartBody").replace("{count}", String(itemCount)).replace("{total}", formatPrice(total))}
+        confirmLabel={t("pos.terminal.clearCart")}
+      />
     </div>
   );
 }

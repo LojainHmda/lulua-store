@@ -2,11 +2,12 @@ import { where } from "../../db/firestore";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useLanguage } from "../../context/LanguageContext";
-import { cashMovementsApi, ordersApi, registerSessionsApi } from "../../firebase/collections";
+import { cashMovementsApi, ordersApi, posReturnsApi, registerSessionsApi } from "../../firebase/collections";
 import { sessionExpectedCash } from "../../firebase/registerSession";
 import { formatPrice } from "../../utils/currency";
-import type { AdminOrder, CashMovement, Register, RegisterSession } from "../types";
+import type { AdminOrder, CashMovement, PosReturn, Register, RegisterSession } from "../types";
 import { Modal } from "./Modal";
+import { PosReturnDetailModal } from "./PosReturnDetail";
 import { Badge, PageLoading } from "./ui";
 
 function tsToDate(v: unknown): Date | null {
@@ -36,11 +37,18 @@ export function ShiftDetailModal({ session, onClose }: { session: RegisterSessio
   const fmt = useFmt();
   const [orders, setOrders] = useState<AdminOrder[] | null>(null);
   const [movements, setMovements] = useState<CashMovement[]>([]);
+  const [returns, setReturns] = useState<PosReturn[]>([]);
+  const [openReturn, setOpenReturn] = useState<PosReturn | null>(null);
 
   useEffect(() => {
     if (!session) return;
     setOrders(null);
     setMovements([]);
+    setReturns([]);
+    posReturnsApi
+      .list([where("sessionId", "==", session.id)])
+      .then((r) => setReturns(r.sort(byTimeDesc)))
+      .catch(() => setReturns([]));
     ordersApi
       .list([where("registerSessionId", "==", session.id)])
       .then((o) => setOrders(o.sort(byTimeDesc)))
@@ -61,11 +69,14 @@ export function ShiftDetailModal({ session, onClose }: { session: RegisterSessio
         [t("pos.openRegister.startingCash"), formatPrice(session.startingCash)],
         [t("pos.closeRegister.cashSales"), `+${formatPrice(session.cashTotal)}`],
         [t("pos.cashOut.withdrawals"), `-${formatPrice(session.cashOutTotal ?? 0)}`],
+        [t("pos.returns.cashRefunds"), `-${formatPrice(session.cashRefundTotal ?? 0)}`],
         [t("pos.closeRegister.expectedCash"), formatPrice(session.expectedCash ?? sessionExpectedCash(session))],
         [t("admin.posSales.counted"), session.countedCash !== undefined ? formatPrice(session.countedCash) : "—"],
         [t("admin.posSales.variance"), <VarianceText key="v" value={session.variance} />],
         [t("pos.closeRegister.cardSales"), formatPrice(session.cardTotal)],
         [t("pos.branch.gross"), `${formatPrice(session.grossTotal)} · ${session.salesCount} ${t("admin.branches.salesShort")}`],
+        [t("pos.returns.cardRefunds"), `-${formatPrice(session.cardRefundTotal ?? 0)}`],
+        [`${t("pos.returns.refunds")} (${session.refundCount ?? 0})`, `-${formatPrice(session.refundTotal ?? 0)}`],
       ]
     : [];
 
@@ -126,6 +137,28 @@ export function ShiftDetailModal({ session, onClose }: { session: RegisterSessio
               </div>
             )}
           </section>
+
+          {returns.length > 0 && (
+            <section>
+              <h3 className="mb-2 font-display text-base font-bold text-ink">
+                {t("pos.returns.title")} <span className="text-ink-faint">({returns.length})</span>
+              </h3>
+              <ul className="divide-y divide-line rounded-lg border border-line text-sm">
+                {returns.map((r) => (
+                  <li key={r.id}>
+                    <button onClick={() => setOpenReturn(r)} className="flex w-full items-center justify-between gap-3 px-3 py-2 text-start hover:bg-cream-dim/50">
+                      <span className="text-ink-soft">
+                        {fmt(r.createdAt)} · <span className="font-mono text-xs text-ink">{r.returnNumber}</span>
+                        {r.orderNumber ? ` · #${r.orderNumber}` : ` · ${t("pos.returns.noReceiptShort")}`} · {t(`pos.terminal.payment.${r.refundMethod}`)}
+                      </span>
+                      <span className="font-semibold text-wine">-{formatPrice(r.refundTotal)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          <PosReturnDetailModal ret={openReturn} onClose={() => setOpenReturn(null)} />
 
           {movements.length > 0 && (
             <section>

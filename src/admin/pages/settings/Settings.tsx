@@ -11,7 +11,12 @@ import { AdminButton, AdminInput, AdminNumberInput, AdminSelect, AdminTextarea, 
 import { logActivity } from "../../logActivity";
 import { SETTINGS_TABS } from "../../navConfig";
 import { EXCHANGE_POLICY_DEFAULTS } from "../../../data/exchangePolicyDefaults";
+import { localizedName } from "../../../data/localize";
+import { categoriesApi } from "../../../firebase/collections";
+import { POS_RETURN_POLICY_DEFAULTS } from "../../posReturns";
 import type {
+  AdminCategory,
+  PosReturnPolicyDoc,
   AppearanceSettingsDoc,
   ContactSettingsDoc,
   ExchangePolicySettingsDoc,
@@ -66,9 +71,82 @@ export default function Settings() {
           {tab === "shipping" && <ShippingTab />}
           {tab === "search" && <SearchTab />}
           {tab === "exchangePolicy" && <ExchangePolicyTab />}
+          {tab === "posReturns" && <PosReturnsTab />}
         </div>
       </div>
     </div>
+  );
+}
+
+// In-store return policy (settings/posReturns): read by the POS Returns
+// screen and processPosReturn(), and the window / no-receipt switch are
+// enforced again by the server rules.
+function PosReturnsTab() {
+  const toast = useToast();
+  const { profile } = useAdminAuth();
+  const { t, lang } = useLanguage();
+  const { value, setValue, loading } = useSettingsDoc<PosReturnPolicyDoc>("posReturns", POS_RETURN_POLICY_DEFAULTS);
+  const [categories, setCategories] = useState<AdminCategory[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    categoriesApi
+      .list()
+      .then((c) => setCategories(c.sort((a, b) => a.order - b.order)))
+      .catch(() => setCategories([]));
+  }, []);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await setSingletonDoc("settings", "posReturns", { ...value, windowDays: Math.max(0, Math.floor(value.windowDays || 0)) });
+      if (profile) await logActivity(profile, "settings.posReturnsUpdated", "");
+      toast.success(t("admin.settings.saved"));
+    } catch {
+      toast.error(t("admin.settings.posReturns.saveFailed"));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <PageLoading />;
+  const ids = new Set(value.nonReturnableCategoryIds);
+  return (
+    <Card className="p-5">
+      <h2 className="mb-1 font-display text-base font-bold text-ink">{t("admin.settings.posReturns.title")}</h2>
+      <p className="mb-4 text-sm text-ink-soft">{t("admin.settings.posReturns.description")}</p>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Field label={t("admin.settings.posReturns.windowDays")} hint={t("admin.settings.posReturns.windowDaysHint")}>
+          <AdminNumberInput integerOnly min={0} value={value.windowDays} onChange={(v) => setValue({ ...value, windowDays: v ?? 0 })} />
+        </Field>
+      </div>
+      <label className="mt-4 flex items-center justify-between rounded-lg border border-line px-3.5 py-2.5">
+        <div>
+          <p className="text-sm font-semibold text-ink">{t("admin.settings.posReturns.allowNoReceipt")}</p>
+          <p className="text-xs text-ink-faint">{t("admin.settings.posReturns.allowNoReceiptHint")}</p>
+        </div>
+        <Toggle checked={value.allowNoReceipt} onChange={(v) => setValue({ ...value, allowNoReceipt: v })} />
+      </label>
+      <div className="mt-4">
+        <p className="text-sm font-semibold text-ink">{t("admin.settings.posReturns.nonReturnable")}</p>
+        <p className="mb-2 text-xs text-ink-faint">{t("admin.settings.posReturns.nonReturnableHint")}</p>
+        <div className="flex flex-wrap gap-1.5">
+          {categories.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() =>
+                setValue({ ...value, nonReturnableCategoryIds: ids.has(c.id) ? value.nonReturnableCategoryIds.filter((x) => x !== c.id) : [...value.nonReturnableCategoryIds, c.id] })
+              }
+              className={`rounded-md border px-2.5 py-1 text-xs font-semibold ${ids.has(c.id) ? "border-wine bg-wine-light text-wine-dark" : "border-line text-ink-soft hover:text-ink"}`}
+            >
+              {localizedName(c.name, c.nameAr, lang)}
+            </button>
+          ))}
+        </div>
+      </div>
+      <SaveBar onSave={save} saving={saving} />
+    </Card>
   );
 }
 

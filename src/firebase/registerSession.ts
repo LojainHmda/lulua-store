@@ -7,9 +7,11 @@ export class RegisterSessionError extends Error {}
 
 // What should physically be in the drawer: the opening float, plus cash
 // taken on sales (the session's running cashTotal, kept by placeOrder()),
-// minus cash withdrawn during the shift. The one place this is computed.
-export function sessionExpectedCash(s: Pick<RegisterSession, "startingCash" | "cashTotal" | "cashOutTotal">): number {
-  return Math.round((s.startingCash + s.cashTotal - (s.cashOutTotal ?? 0)) * 100) / 100;
+// minus cash withdrawn during the shift and cash paid back on returns
+// (cashRefundTotal, kept by processPosReturn()). The one place this is
+// computed; the rules' posReturns check mirrors it.
+export function sessionExpectedCash(s: Pick<RegisterSession, "startingCash" | "cashTotal" | "cashOutTotal" | "cashRefundTotal">): number {
+  return Math.round((s.startingCash + s.cashTotal - (s.cashOutTotal ?? 0) - (s.cashRefundTotal ?? 0)) * 100) / 100;
 }
 
 export async function findOpenSession(cashierId: string): Promise<RegisterSession | null> {

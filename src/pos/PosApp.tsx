@@ -18,7 +18,9 @@ import DeviceStartShift from "./DeviceStartShift";
 import CloseRegister from "./CloseRegister";
 import OpenRegister from "./OpenRegister";
 import PosLayout from "./PosLayout";
+import { OfflineProvider } from "./offline/OfflineContext";
 import { tillBase, tillUrl } from "./posPaths";
+import Returns from "./Returns";
 import Terminal from "./Terminal";
 import TodaySales from "./TodaySales";
 
@@ -35,7 +37,7 @@ function StartScreen({ session, onOpened }: { session: RegisterSession | null; o
   return <OpenRegister preset={{ branchCode: branchCode ?? null, registerId: registerId ?? null, cashierId: params.get("cashier") }} onOpened={onOpened} />;
 }
 
-// /pos/<branchCode>/<registerId>[/sales|/close]: only ever shows the
+// /pos/<branchCode>/<registerId>[/sales|/returns|/close]: only ever shows the
 // signed-in user's own open session; any other till URL redirects to it (or
 // to the start screen, pre-selected, when nothing is open yet).
 function TillRoute({
@@ -46,7 +48,7 @@ function TillRoute({
   onClosed,
 }: {
   session: RegisterSession | null;
-  screen: "till" | "sales" | "close";
+  screen: "till" | "sales" | "returns" | "close";
   onOpened: (s: RegisterSession) => void;
   onSessionUpdate: () => void;
   onClosed: () => void;
@@ -59,6 +61,7 @@ function TillRoute({
     return <Navigate to={screen === "till" ? tillUrl(session) : expected} replace />;
   }
   if (screen === "sales") return <TodaySales session={session} />;
+  if (screen === "returns") return <Returns session={session} onSessionUpdate={onSessionUpdate} />;
   if (screen === "close") return <CloseRegister session={session} onClosed={onClosed} />;
   return <Terminal session={session} onSessionUpdate={onSessionUpdate} />;
 }
@@ -135,21 +138,24 @@ function PosRoutes() {
     findOpenSession(profile.id)
       .then(setSession)
       .catch(() => {});
-  const till = (screen: "till" | "sales" | "close") => (
+  const till = (screen: "till" | "sales" | "returns" | "close") => (
     <TillRoute session={session} screen={screen} onOpened={setSession} onSessionUpdate={refresh} onClosed={() => setSession(null)} />
   );
 
   return (
+    <OfflineProvider session={session} onSynced={refresh}>
     <PosLayout session={session} onSessionUpdate={refresh}>
       <Routes>
         <Route path="/" element={<StartScreen session={session} onOpened={setSession} />} />
         <Route path="/:branchCode" element={<StartScreen session={session} onOpened={setSession} />} />
         <Route path="/:branchCode/:registerId" element={till("till")} />
         <Route path="/:branchCode/:registerId/sales" element={till("sales")} />
+        <Route path="/:branchCode/:registerId/returns" element={till("returns")} />
         <Route path="/:branchCode/:registerId/close" element={till("close")} />
         <Route path="*" element={<Navigate to="/pos" replace />} />
       </Routes>
     </PosLayout>
+    </OfflineProvider>
   );
 }
 

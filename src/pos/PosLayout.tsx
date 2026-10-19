@@ -8,11 +8,13 @@ import { useAdminAuth } from "../admin/AdminAuthContext";
 import AdminIcon from "../admin/components/AdminIcons";
 import { formatPrice } from "../utils/currency";
 import CashWithdrawal from "./CashWithdrawal";
+import { OfflineBanner } from "./offline/OfflineBanner";
+import { useOffline } from "./offline/OfflineContext";
 import { tillBase, tillUrl } from "./posPaths";
 
 // A compact till header: where this till is (with the language switch next
 // to it), the shift's running total, and the till's own actions (Today's
-// sales, cash withdrawal, Close register). No menu: nothing here leads out
+// sales, Returns, cash withdrawal, Close register). No menu: nothing here leads out
 // of the till to the storefront.
 export default function PosLayout({
   session,
@@ -34,7 +36,11 @@ export default function PosLayout({
   const tillHref = session ? tillUrl(session) : "/pos";
   const onCloseScreen = !!session && location.pathname.endsWith("/close");
   const onSalesScreen = !!session && location.pathname.endsWith("/sales");
+  const onReturnsScreen = !!session && location.pathname.endsWith("/returns");
   const [withdrawOpen, setWithdrawOpen] = useState(false);
+  // Online-only actions are disabled offline; signing out is blocked while
+  // this user's offline sales are still waiting (they'd stay unsent).
+  const { online, pendingCount } = useOffline();
 
   const pill = "whitespace-nowrap rounded-full border border-line px-3.5 py-1.5 text-sm font-semibold text-wine hover:bg-cream-dim";
 
@@ -82,10 +88,27 @@ export default function PosLayout({
               {t("pos.layout.salesCount").replace("{count}", String(session.salesCount))} · <b className="text-ink">{formatPrice(session.grossTotal)}</b>
             </span>
           )}
+          {/* The till's three screens as one fixed switch: the buttons never
+              move or change their text, the current one is highlighted. */}
           {session && !onCloseScreen && (
-            <Link to={onSalesScreen ? tillHref : `${base}/sales`} className={pill}>
-              {onSalesScreen ? t("pos.branch.backToTill") : t("pos.branch.todaysSales")}
-            </Link>
+            <nav className="flex rounded-full border border-line bg-paper p-0.5">
+              {[
+                { href: tillHref, label: t("pos.layout.saleTab"), active: !onReturnsScreen && !onSalesScreen },
+                { href: `${base}/returns`, label: t("pos.returns.title"), active: onReturnsScreen },
+                { href: `${base}/sales`, label: t("pos.branch.todaysSales"), active: onSalesScreen },
+              ].map((tab) => (
+                <Link
+                  key={tab.label}
+                  to={tab.href}
+                  aria-current={tab.active ? "page" : undefined}
+                  className={`whitespace-nowrap rounded-full px-3.5 py-1 text-sm font-semibold transition-colors ${
+                    tab.active ? "bg-wine text-on-accent" : "text-ink-soft hover:text-wine"
+                  }`}
+                >
+                  {tab.label}
+                </Link>
+              ))}
+            </nav>
           )}
           {session && !onCloseScreen && (
             <Link to={`${base}/close`} className={`${pill} hidden sm:inline-flex`}>
@@ -94,7 +117,12 @@ export default function PosLayout({
           )}
 
           {session && !onCloseScreen && (
-            <button onClick={() => setWithdrawOpen(true)} className={`${pill} hidden sm:inline-flex`}>
+            <button
+              disabled={!online}
+              title={online ? undefined : t("pos.offline.onlineOnly")}
+              onClick={() => setWithdrawOpen(true)}
+              className={`${pill} hidden disabled:cursor-not-allowed disabled:opacity-40 sm:inline-flex`}
+            >
               {t("pos.cashOut.title")}
             </button>
           )}
@@ -108,6 +136,7 @@ export default function PosLayout({
               orphan it, so devices have no sign-out. */}
           {!profile?.posLink && (
             <button
+              disabled={pendingCount > 0}
               onClick={() => void signOutAdmin()}
               aria-label={t("admin.nav.signOut")}
               title={t("admin.nav.signOut")}
@@ -118,6 +147,7 @@ export default function PosLayout({
           )}
         </div>
       </header>
+      {session && <OfflineBanner />}
       <main className="min-h-0 flex-1">{children}</main>
       {session && <CashWithdrawal session={session} open={withdrawOpen} onClose={() => setWithdrawOpen(false)} onDone={() => onSessionUpdate?.()} />}
     </div>

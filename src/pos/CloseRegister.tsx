@@ -4,11 +4,15 @@ import { useAdminAuth } from "../admin/AdminAuthContext";
 import { logActivity } from "../admin/logActivity";
 import type { RegisterSession } from "../admin/types";
 import { registerSessionsApi } from "../firebase/collections";
+import { db } from "../firebase/config";
+import { discardHeldSale, subscribeHeldSales } from "../firebase/heldSales";
+import type { HeldSale } from "../admin/types";
 import { closeRegister, RegisterSessionError, sessionExpectedCash } from "../firebase/registerSession";
 import { useLanguage } from "../context/LanguageContext";
 import { formatPrice } from "../utils/currency";
 import { NumberInput, type NumericValue } from "../components/ui/NumberInput";
 import { tillUrl } from "./posPaths";
+import { useOffline } from "./offline/OfflineContext";
 
 export default function CloseRegister({ session: initial, onClosed }: { session: RegisterSession; onClosed: () => void }) {
   const navigate = useNavigate();
@@ -22,6 +26,32 @@ export default function CloseRegister({ session: initial, onClosed }: { session:
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [closed, setClosed] = useState(false);
+  // A shift can't close while it's offline or has offline sales not sent yet:
+  // the cash count would not match what the server knows.
+  const { online, sales: offlineSales, forgetSession } = useOffline();
+  const waiting = offlineSales.filter((p) => p.sessionId === initial.id && p.status === "pending").length;
+  // Sales this shift put on hold and nobody resumed. They stay at the branch
+  // (any till can resume them for 24h) unless the cashier discards them here.
+  const [held, setHeld] = useState<HeldSale[]>([]);
+  const [discarding, setDiscarding] = useState(false);
+  useEffect(
+    () => (initial.branchId ? subscribeHeldSales(db, initial.branchId, (list) => setHeld(list.filter((h) => h.sessionId === initial.id))) : undefined),
+    [initial.branchId, initial.id]
+  );
+  async function discardAllHeld() {
+    if (!profile) return;
+    setDiscarding(true);
+    const name = profile.posLink ? session.cashierName : profile.displayName;
+    for (const h of held) {
+      try {
+        await discardHeldSale(db, h.id, { uid: profile.id, name });
+        void logActivity({ id: profile.id, email: profile.email, displayName: name }, "pos.heldSaleDiscarded", h.ref, `${h.itemCount} · ${formatPrice(h.subtotal)}`);
+      } catch {
+        // Already resumed/discarded by another till: nothing to do.
+      }
+    }
+    setDiscarding(false);
+  }
 
   useEffect(() => {
     registerSessionsApi
@@ -49,6 +79,13 @@ export default function CloseRegister({ session: initial, onClosed }: { session:
       // session's own closedByUid/Email/Name (written above) remain the
       // source of truth.
       await logActivity(profile, "pos.registerClosed", session.cashierName);
+      // Nothing of this shift needs to stay on the device any more.
+      await forgetSession(session.id);
+      try {
+        window.sessionStorage.removeItem(`lulua-pos-cart:${session.id}`);
+      } catch {
+        // Storage unavailable: nothing was kept there either.
+      }
       setClosed(true);
     } catch (err) {
       setError(err instanceof RegisterSessionError ? err.message : t("admin.posSales.closeFailed"));
@@ -103,6 +140,10 @@ export default function CloseRegister({ session: initial, onClosed }: { session:
             <dt>{t("pos.cashOut.withdrawals")}</dt>
             <dd>-{formatPrice(cashOut)}</dd>
           </div>
+          <div className="flex justify-between text-ink-soft">
+            <dt>{t("pos.returns.cashRefunds")}</dt>
+            <dd>-{formatPrice(session.cashRefundTotal ?? 0)}</dd>
+          </div>
           <div className="flex justify-between border-t border-line pt-2 font-semibold text-ink">
             <dt>{t("pos.closeRegister.expectedCash")}</dt>
             <dd>{formatPrice(expectedCash)}</dd>
@@ -112,11 +153,36 @@ export default function CloseRegister({ session: initial, onClosed }: { session:
             <dd>{formatPrice(session.cardTotal)}</dd>
           </div>
           <div className="flex justify-between text-ink-soft">
+            <dt>{t("pos.returns.cardRefunds")}</dt>
+            <dd>-{formatPrice(session.cardRefundTotal ?? 0)}</dd>
+          </div>
+          <div className="flex justify-between text-ink-soft">
             <dt>{t("pos.closeRegister.salesCount")}</dt>
             <dd>{session.salesCount}</dd>
           </div>
+          {(session.refundCount ?? 0) > 0 && (
+            <div className="flex justify-between text-ink-soft">
+              <dt>{t("pos.returns.returnsCount")}</dt>
+              <dd>{session.refundCount}</dd>
+            </div>
+          )}
         </dl>
       </div>
+
+      {held.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-wine/40 bg-wine-light px-3 py-2 text-sm text-wine-dark">
+          <span>
+            {t("pos.hold.closeNotice").replace("{count}", String(held.length))} <span className="font-mono text-xs">{held.map((h) => h.ref).join(", ")}</span>
+          </span>
+          <button
+            disabled={discarding}
+            onClick={() => void discardAllHeld()}
+            className="rounded-full border border-wine/50 px-3 py-1 text-xs font-semibold hover:bg-paper disabled:opacity-40"
+          >
+            {t("pos.hold.discardAll")}
+          </button>
+        </div>
+      )}
 
       <label className="flex flex-col gap-1.5">
         <span className="text-sm font-semibold text-ink">{t("pos.closeRegister.countedCash")}</span>
@@ -139,6 +205,11 @@ export default function CloseRegister({ session: initial, onClosed }: { session:
         </div>
       )}
 
+      {(!online || waiting > 0) && (
+        <p className="rounded-lg bg-wine-light px-3 py-2 text-sm font-semibold text-wine">
+          {!online ? t("pos.offline.closeOffline") : t("pos.offline.closeWaiting").replace("{n}", String(waiting))}
+        </p>
+      )}
       {error && <p className="rounded-lg bg-wine-light px-3 py-2 text-sm font-semibold text-wine">{error}</p>}
 
       <div className="flex gap-2">
@@ -147,7 +218,7 @@ export default function CloseRegister({ session: initial, onClosed }: { session:
         </button>
         <button
           onClick={() => void handleClose()}
-          disabled={submitting || countedCash === null}
+          disabled={submitting || countedCash === null || !online || waiting > 0}
           className="flex-1 rounded-full bg-wine py-3 text-sm font-semibold text-on-accent hover:bg-wine-dark disabled:cursor-not-allowed disabled:opacity-40"
         >
           {submitting ? t("pos.closeRegister.closing") : t("pos.layout.closeRegister")}

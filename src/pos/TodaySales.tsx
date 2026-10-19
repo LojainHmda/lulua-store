@@ -1,9 +1,9 @@
 import { orderBy, Timestamp, where } from "../db/firestore";
 import { useEffect, useMemo, useState } from "react";
 import { PageLoading } from "../admin/components/ui";
-import type { AdminOrder, RegisterSession } from "../admin/types";
+import type { AdminOrder, PosReturn, RegisterSession } from "../admin/types";
 import { useLanguage } from "../context/LanguageContext";
-import { ordersApi } from "../firebase/collections";
+import { ordersApi, posReturnsApi } from "../firebase/collections";
 import { sessionExpectedCash } from "../firebase/registerSession";
 import { formatPrice } from "../utils/currency";
 
@@ -19,6 +19,7 @@ function tsToDate(v: unknown): Date | null {
 export default function TodaySales({ session }: { session: RegisterSession }) {
   const { t, lang } = useLanguage();
   const [orders, setOrders] = useState<AdminOrder[] | null>(null);
+  const [returns, setReturns] = useState<PosReturn[]>([]);
   const [registerFilter, setRegisterFilter] = useState<"all" | "mine">("all");
 
   useEffect(() => {
@@ -28,16 +29,30 @@ export default function TodaySales({ session }: { session: RegisterSession }) {
     }
     const start = new Date();
     start.setHours(0, 0, 0, 0);
-    return ordersApi.subscribe(setOrders, [
+    const u1 = ordersApi.subscribe(setOrders, [
       where("branchId", "==", session.branchId),
       where("createdAt", ">=", Timestamp.fromDate(start)),
       orderBy("createdAt", "desc"),
     ]);
+    // Returns taken in at this branch today (whichever branch sold them).
+    const u2 = posReturnsApi.subscribe(setReturns, [
+      where("branchId", "==", session.branchId),
+      where("createdAt", ">=", Timestamp.fromDate(start)),
+      orderBy("createdAt", "desc"),
+    ]);
+    return () => {
+      u1();
+      u2();
+    };
   }, [session.branchId]);
 
   const shown = useMemo(
     () => (orders ?? []).filter((o) => o.source === "pos" && (registerFilter === "all" || o.registerId === session.registerId)),
     [orders, registerFilter, session.registerId]
+  );
+  const shownReturns = useMemo(
+    () => returns.filter((r) => registerFilter === "all" || r.registerId === session.registerId),
+    [returns, registerFilter, session.registerId]
   );
   const totals = useMemo(() => {
     const valid = shown.filter((o) => o.status !== "cancelled" && o.status !== "refunded");
@@ -47,8 +62,9 @@ export default function TodaySales({ session }: { session: RegisterSession }) {
       cash: valid.reduce((s, o) => s + (o.cashAmount ?? 0), 0),
       card: valid.reduce((s, o) => s + (o.cardAmount ?? 0), 0),
       items: valid.reduce((s, o) => s + o.lines.reduce((n, l) => n + l.qty, 0), 0),
+      refunds: shownReturns.reduce((s, r) => s + r.refundTotal, 0),
     };
-  }, [shown]);
+  }, [shown, shownReturns]);
 
   if (orders === null) {
     return (
@@ -68,12 +84,13 @@ export default function TodaySales({ session }: { session: RegisterSession }) {
           <p className="text-sm text-ink-soft">
             {session.branchName} · {session.registerName} · {session.cashierName}
           </p>
-          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
             {[
               { label: t("pos.closeRegister.salesCount"), value: String(session.salesCount) },
               { label: t("pos.branch.gross"), value: formatPrice(session.grossTotal) },
               { label: t("pos.closeRegister.cashSales"), value: formatPrice(session.cashTotal) },
               { label: t("pos.closeRegister.cardSales"), value: formatPrice(session.cardTotal) },
+              { label: `${t("pos.returns.refunds")} (${session.refundCount ?? 0})`, value: `-${formatPrice(session.refundTotal ?? 0)}` },
             ].map((k) => (
               <div key={k.label} className="rounded-xl bg-paper p-4 shadow-soft">
                 <p className="text-xs font-semibold uppercase text-ink-faint">{k.label}</p>
@@ -87,6 +104,12 @@ export default function TodaySales({ session }: { session: RegisterSession }) {
               <>
                 {" "}
                 · {t("pos.cashOut.withdrawals")} -{formatPrice(session.cashOutTotal ?? 0)}
+              </>
+            )}
+            {(session.cashRefundTotal ?? 0) > 0 && (
+              <>
+                {" "}
+                · {t("pos.returns.cashRefunds")} -{formatPrice(session.cashRefundTotal ?? 0)}
               </>
             )}
             )
@@ -124,6 +147,9 @@ export default function TodaySales({ session }: { session: RegisterSession }) {
             <span>
               {t("pos.terminal.card")}: <b className="text-ink">{formatPrice(totals.card)}</b>
             </span>
+            <span>
+              {t("pos.returns.refunds")}: <b className="text-ink">-{formatPrice(totals.refunds)}</b>
+            </span>
           </div>
           {shown.length === 0 ? (
             <p className="rounded-xl border border-dashed border-line py-10 text-center text-sm text-ink-faint">{t("pos.branch.noSalesToday")}</p>
@@ -150,7 +176,10 @@ export default function TodaySales({ session }: { session: RegisterSession }) {
                       <td className="px-3 py-2 text-ink">{o.registerName ?? "—"}</td>
                       <td className="px-3 py-2 text-ink">{o.cashierName ?? "—"}</td>
                       <td className="px-3 py-2 text-ink-soft">{o.paymentMethod ? t(`pos.terminal.payment.${o.paymentMethod}`) : "—"}</td>
-                      <td className="px-3 py-2 text-end font-semibold text-ink">{formatPrice(o.total)}</td>
+                      <td className="px-3 py-2 text-end font-semibold text-ink">
+                        {formatPrice(o.total)}
+                        {(o.refundedTotal ?? 0) > 0 && <span className="block text-[11px] font-normal text-wine">-{formatPrice(o.refundedTotal ?? 0)}</span>}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -158,6 +187,40 @@ export default function TodaySales({ session }: { session: RegisterSession }) {
             </div>
           )}
         </section>
+
+        {shownReturns.length > 0 && (
+          <section>
+            <h2 className="mb-3 font-display text-xl font-bold text-ink">{t("pos.returns.todayReturns")}</h2>
+            <div className="overflow-x-auto rounded-xl border border-line bg-paper">
+              <table className="w-full text-sm">
+                <thead className="bg-cream-dim text-xs uppercase text-ink-faint">
+                  <tr>
+                    <th className="px-3 py-2 text-start">{t("pos.branch.time")}</th>
+                    <th className="px-3 py-2 text-start">#</th>
+                    <th className="px-3 py-2 text-start">{t("pos.returns.originalSale")}</th>
+                    <th className="px-3 py-2 text-start">{t("pos.branch.cashier")}</th>
+                    <th className="px-3 py-2 text-start">{t("pos.returns.refundMethod")}</th>
+                    <th className="px-3 py-2 text-end">{t("pos.returns.refundTotal")}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line">
+                  {shownReturns.map((r) => (
+                    <tr key={r.id}>
+                      <td className="px-3 py-2 text-ink-soft">
+                        {tsToDate(r.createdAt)?.toLocaleTimeString(lang === "ar" ? "ar" : "en-US", { hour: "2-digit", minute: "2-digit" }) ?? "—"}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-ink">{r.returnNumber}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-ink-soft">{r.orderNumber ?? t("pos.returns.noReceiptShort")}</td>
+                      <td className="px-3 py-2 text-ink">{r.cashierName}</td>
+                      <td className="px-3 py-2 text-ink-soft">{t(`pos.terminal.payment.${r.refundMethod}`)}</td>
+                      <td className="px-3 py-2 text-end font-semibold text-wine">-{formatPrice(r.refundTotal)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );

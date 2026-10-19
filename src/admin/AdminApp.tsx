@@ -22,7 +22,11 @@ import Inventory from "./pages/Inventory";
 import StockLedger from "./pages/StockLedger";
 import BranchStock from "./pages/BranchStock";
 import Branches from "./pages/Branches";
+import BranchDay from "./pages/BranchDay";
 import PosSales from "./pages/PosSales";
+import PosReturns from "./pages/PosReturns";
+import PosReports from "./pages/PosReports";
+import PosDiscounts from "./pages/PosDiscounts";
 import MediaLibrary from "./pages/MediaLibrary";
 import Team from "./pages/Team";
 import OrderList from "./pages/orders/OrderList";
@@ -158,10 +162,42 @@ function AdminRoutes() {
           }
         />
         <Route
+          path="branches/:branchId/day"
+          element={
+            <RequireRole roles={["owner", "admin"]}>
+              <BranchDay />
+            </RequireRole>
+          }
+        />
+        <Route
           path="pos-sales"
           element={
             <RequireRole roles={["owner", "admin"]}>
               <PosSales />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="pos-discounts"
+          element={
+            <RequireRole roles={["owner", "admin"]}>
+              <PosDiscounts />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="pos-reports"
+          element={
+            <RequireRole roles={["owner", "admin"]}>
+              <PosReports />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="pos-returns"
+          element={
+            <RequireRole roles={["owner", "admin"]}>
+              <PosReturns />
             </RequireRole>
           }
         />

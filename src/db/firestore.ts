@@ -584,9 +584,18 @@ function listen<S>(
       } while (again && !stopped);
     } catch (e) {
       if (!stopped) {
-        stopped = true;
-        cleanup();
-        error(e instanceof ApiError ? e : new ApiError("unknown", String(e), 0));
+        // No connection (server unreachable): keep the last data and try
+        // again shortly -- a dropped network must never end a listener or
+        // blank what the screen shows (a till keeps selling offline). The
+        // change feed also triggers a re-fetch when it reconnects.
+        if (e instanceof ApiError && e.code === "unavailable") {
+          clearTimeout(timer);
+          timer = setTimeout(refresh, 5000);
+        } else {
+          stopped = true;
+          cleanup();
+          error(e instanceof ApiError ? e : new ApiError("unknown", String(e), 0));
+        }
       }
     } finally {
       inflight = false;

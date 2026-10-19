@@ -25,6 +25,7 @@ import { AddOrderItemModal, type AddedLine } from "./AddOrderItemModal";
 import { formatPrice } from "../../../utils/currency";
 import { InvoiceModal } from "./InvoiceModal";
 import ProcessReturnModal from "../../components/ProcessReturnModal";
+import { PosSaleReturns } from "../../components/PosReturnDetail";
 import ProductPhoto from "../../../components/ui/ProductPhoto";
 import { useBarcodeScanner } from "../../../pos/useBarcodeScanner";
 import { useOrder } from "./useOrder";
@@ -493,7 +494,9 @@ export default function OrderDetail() {
           // new navigation icons below are deliberately NOT added here, so
           // they can't add to it; see the next row for those.
           <>
-            {canWrite && RETURNABLE_ORDER_STATUSES.includes(order.status) && (
+            {/* An in-store sale is returned at a till (POS Returns), where
+                the refund, the stock and the shift move together. */}
+            {canWrite && order.source !== "pos" && RETURNABLE_ORDER_STATUSES.includes(order.status) && (
               <AdminButton variant="secondary" onClick={() => setReturnOpen(true)}>
                 {t("admin.returns.processReturn")}
               </AdminButton>
@@ -541,6 +544,7 @@ export default function OrderDetail() {
           {order.paymentMethod && <span>· {t(`pos.terminal.payment.${order.paymentMethod}`)}</span>}
         </div>
       )}
+      {order.source === "pos" && <PosSaleReturns order={order} />}
 
       <div className="mb-6 flex flex-wrap items-center justify-end gap-2">
         <AdminButton

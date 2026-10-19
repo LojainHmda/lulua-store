@@ -1,21 +1,22 @@
 import { orderBy, Timestamp, where } from "../../db/firestore";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { branchesApi, ordersApi, registersApi, registerSessionsApi } from "../../firebase/collections";
+import { branchesApi, ordersApi, posReturnsApi, registersApi, registerSessionsApi } from "../../firebase/collections";
 import { closeRegister, RegisterSessionError, sessionExpectedCash } from "../../firebase/registerSession";
 import { NumberInput, type NumericValue } from "../../components/ui/NumberInput";
 import { useLanguage } from "../../context/LanguageContext";
 import { localizedName } from "../../data/localize";
 import { useAdminAuth } from "../AdminAuthContext";
 import { Modal } from "../components/Modal";
+import { PosReturnDetailModal } from "../components/PosReturnDetail";
+import { OfflineSalesReview } from "../components/OfflineSalesReview";
 import { ShiftDetailModal } from "../components/ShiftHistory";
 import { useToast } from "../components/ToastContext";
 import { AdminButton, AdminInput, AdminSelect, Badge, Card, PageHeader, PageLoading } from "../components/ui";
 import { logActivity } from "../logActivity";
-import type { AdminOrder, Branch, Register, RegisterSession } from "../types";
+import type { AdminOrder, Branch, PosReturn, Register, RegisterSession } from "../types";
 import { formatPrice } from "../../utils/currency";
-
-type Range = "today" | "yesterday" | "7d" | "month" | "custom";
+import { POS_RANGES, rangeBounds, toInputDate, type PosRange as Range } from "../posDateRange";
 
 // Shared admin field style is full-width; filters here size to their content.
 const FILTER_CONTROL = "!w-auto !py-1.5 min-w-[9rem]";
@@ -36,44 +37,6 @@ function EmptyRow({ text }: { text: string }) {
 function tsToDate(v: unknown): Date | null {
   const ts = v as { toDate?: () => Date } | undefined;
   return ts?.toDate ? ts.toDate() : null;
-}
-
-function dayStart(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-}
-
-function toInputDate(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function rangeBounds(range: Range, from: string, to: string): { start: Date; end: Date } {
-  const today = dayStart(new Date());
-  const end = new Date(today);
-  end.setDate(end.getDate() + 1);
-  switch (range) {
-    case "today":
-      return { start: today, end };
-    case "yesterday": {
-      const s = new Date(today);
-      s.setDate(s.getDate() - 1);
-      return { start: s, end: today };
-    }
-    case "7d": {
-      const s = new Date(today);
-      s.setDate(s.getDate() - 6);
-      return { start: s, end };
-    }
-    case "month":
-      return { start: new Date(today.getFullYear(), today.getMonth(), 1), end };
-    case "custom": {
-      const s = from ? dayStart(new Date(`${from}T00:00:00`)) : today;
-      const e = to ? dayStart(new Date(`${to}T00:00:00`)) : today;
-      e.setDate(e.getDate() + 1);
-      return { start: s, end: e };
-    }
-  }
 }
 
 // Every branch's in-store sales in one place: owner/admin only. Filter by
@@ -99,6 +62,9 @@ export default function PosSales() {
   const [countedCash, setCountedCash] = useState<NumericValue>(null);
   const [closing, setClosing] = useState(false);
   const [detail, setDetail] = useState<RegisterSession | null>(null);
+  // Returns taken in during the window (by the receiving branch/till/cashier).
+  const [returns, setReturns] = useState<PosReturn[]>([]);
+  const [openReturn, setOpenReturn] = useState<PosReturn | null>(null);
 
   const { start, end } = useMemo(() => rangeBounds(range, from, to), [range, from, to]);
 
@@ -125,9 +91,15 @@ export default function PosSales() {
       where("openedAt", "<", Timestamp.fromDate(end)),
       orderBy("openedAt", "desc"),
     ]);
+    const u3 = posReturnsApi.subscribe(setReturns, [
+      where("createdAt", ">=", Timestamp.fromDate(start)),
+      where("createdAt", "<", Timestamp.fromDate(end)),
+      orderBy("createdAt", "desc"),
+    ]);
     return () => {
       u1();
       u2();
+      u3();
     };
   }, [start, end]);
 
@@ -160,32 +132,46 @@ export default function PosSales() {
     return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
   }, [orders, sessions]);
 
+  // Returns count where (and when, and by whom) the money went back -- the
+  // receiving till -- not against the day of the original sale.
+  const filteredReturns = useMemo(() => returns.filter((r) => matches(r, r.operatorId ?? r.cashierUid)), [returns, matches]);
+
   const kpis = useMemo(() => {
     const gross = filtered.reduce((s, o) => s + o.total, 0);
+    const refunds = filteredReturns.reduce((s, r) => s + r.refundTotal, 0);
     return {
       count: filtered.length,
       gross,
+      refunds,
+      refundCount: filteredReturns.length,
+      net: gross - refunds,
       cash: filtered.reduce((s, o) => s + (o.cashAmount ?? 0), 0),
       card: filtered.reduce((s, o) => s + (o.cardAmount ?? 0), 0),
       discount: filtered.reduce((s, o) => s + (o.discount ?? 0), 0),
       items: filtered.reduce((s, o) => s + o.lines.reduce((n, l) => n + l.qty, 0), 0),
       avg: filtered.length ? gross / filtered.length : 0,
     };
-  }, [filtered]);
+  }, [filtered, filteredReturns]);
 
   const byBranch = useMemo(() => {
-    const m = new Map<string, { count: number; gross: number; cash: number; card: number }>();
+    const m = new Map<string, { count: number; gross: number; cash: number; card: number; refunds: number }>();
+    const entry = (k: string) => m.get(k) ?? { count: 0, gross: 0, cash: 0, card: 0, refunds: 0 };
     filtered.forEach((o) => {
       const k = o.branchId ?? "—";
-      const e = m.get(k) ?? { count: 0, gross: 0, cash: 0, card: 0 };
+      const e = entry(k);
       e.count += 1;
       e.gross += o.total;
       e.cash += o.cashAmount ?? 0;
       e.card += o.cardAmount ?? 0;
       m.set(k, e);
     });
+    filteredReturns.forEach((r) => {
+      const e = entry(r.branchId);
+      e.refunds += r.refundTotal;
+      m.set(r.branchId, e);
+    });
     return [...m.entries()].sort((a, b) => b[1].gross - a[1].gross);
-  }, [filtered]);
+  }, [filtered, filteredReturns]);
 
   // Shifts opened in the window, plus any still-open shift from before it
   // (a till left open overnight must never drop out of view).
@@ -223,11 +209,12 @@ export default function PosSales() {
   return (
     <div>
       <PageHeader title={t("admin.nav.posSales")} description={t("admin.posSales.subtitle")} />
+      <OfflineSalesReview branchName={branchName} />
 
       {/* One compact toolbar: date range on the left, who/where on the right. */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="flex rounded-lg border border-line bg-paper p-0.5" role="radiogroup">
-          {(["today", "yesterday", "7d", "month", "custom"] as Range[]).map((r) => (
+          {POS_RANGES.map((r) => (
             <button
               key={r}
               role="radio"
@@ -286,10 +273,12 @@ export default function PosSales() {
         <PageLoading />
       ) : (
         <>
-          <Card className="mb-4 grid grid-cols-2 divide-line overflow-hidden p-0 sm:grid-cols-4 lg:grid-cols-7 lg:divide-x rtl:lg:divide-x-reverse">
+          <Card className="mb-4 grid grid-cols-2 divide-line overflow-hidden p-0 sm:grid-cols-5 lg:grid-cols-9 lg:divide-x rtl:lg:divide-x-reverse">
             {[
               { label: t("pos.closeRegister.salesCount"), value: String(kpis.count) },
               { label: t("pos.branch.gross"), value: formatPrice(kpis.gross) },
+              { label: `${t("pos.returns.refunds")} (${kpis.refundCount})`, value: `-${formatPrice(kpis.refunds)}` },
+              { label: t("pos.returns.netSales"), value: formatPrice(kpis.net) },
               { label: t("pos.terminal.cash"), value: formatPrice(kpis.cash) },
               { label: t("pos.terminal.card"), value: formatPrice(kpis.card) },
               { label: t("pos.terminal.discountLabel"), value: formatPrice(kpis.discount) },
@@ -313,6 +302,8 @@ export default function PosSales() {
                     <th className="px-4 py-2 text-end">{t("pos.terminal.cash")}</th>
                     <th className="px-4 py-2 text-end">{t("pos.terminal.card")}</th>
                     <th className="px-4 py-2 text-end">{t("pos.branch.gross")}</th>
+                    <th className="px-4 py-2 text-end">{t("pos.returns.refunds")}</th>
+                    <th className="px-4 py-2 text-end">{t("pos.returns.netSales")}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line">
@@ -322,7 +313,9 @@ export default function PosSales() {
                       <td className="px-4 py-2 text-end">{e.count}</td>
                       <td className="px-4 py-2 text-end">{formatPrice(e.cash)}</td>
                       <td className="px-4 py-2 text-end">{formatPrice(e.card)}</td>
-                      <td className="px-4 py-2 text-end font-semibold">{formatPrice(e.gross)}</td>
+                      <td className="px-4 py-2 text-end">{formatPrice(e.gross)}</td>
+                      <td className="px-4 py-2 text-end text-wine">{e.refunds > 0 ? `-${formatPrice(e.refunds)}` : "—"}</td>
+                      <td className="px-4 py-2 text-end font-semibold">{formatPrice(e.gross - e.refunds)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -365,7 +358,59 @@ export default function PosSales() {
                       <td className="px-3 py-2 text-end font-semibold text-ink">
                         {formatPrice(o.total)}
                         {(o.discount ?? 0) > 0 && <span className="block text-[11px] font-normal text-ink-faint">-{formatPrice(o.discount ?? 0)}</span>}
+                        {(o.refundedTotal ?? 0) > 0 && (
+                          <span className="block text-[11px] font-normal text-wine">
+                            {t("pos.returns.refundedShort")} -{formatPrice(o.refundedTotal ?? 0)}
+                          </span>
+                        )}
                       </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+          )}
+
+          <SectionTitle title={t("pos.returns.title")} count={filteredReturns.length} />
+          {filteredReturns.length === 0 ? (
+            <EmptyRow text={t("pos.returns.noReturns")} />
+          ) : (
+            <Card className="overflow-x-auto p-0">
+              <table className="w-full text-sm">
+                <thead className="whitespace-nowrap bg-cream-dim text-xs uppercase text-ink-faint">
+                  <tr>
+                    <th className="px-3 py-2 text-start">{t("pos.branch.time")}</th>
+                    <th className="px-3 py-2 text-start">#</th>
+                    <th className="px-3 py-2 text-start">{t("pos.returns.originalSale")}</th>
+                    <th className="px-3 py-2 text-start">{t("pos.returns.returnedAt")}</th>
+                    <th className="px-3 py-2 text-start">{t("pos.branch.cashier")}</th>
+                    <th className="px-3 py-2 text-end">{t("pos.branch.items")}</th>
+                    <th className="px-3 py-2 text-start">{t("pos.returns.refundMethod")}</th>
+                    <th className="px-3 py-2 text-end">{t("pos.returns.refundTotal")}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line">
+                  {filteredReturns.map((r) => (
+                    <tr key={r.id} onClick={() => setOpenReturn(r)} className="cursor-pointer hover:bg-cream-dim/50">
+                      <td className="px-3 py-2 text-ink-soft">{fmtTime(r.createdAt)}</td>
+                      <td className="px-3 py-2 font-mono text-xs font-semibold text-wine">{r.returnNumber}</td>
+                      <td className="px-3 py-2 font-mono text-xs">
+                        {r.orderId ? (
+                          <Link to={`/admin/orders/${r.orderId}`} onClick={(e) => e.stopPropagation()} className="text-wine hover:underline">
+                            {r.orderNumber}
+                          </Link>
+                        ) : (
+                          <span className="text-ink-faint">{t("pos.returns.noReceiptShort")}</span>
+                        )}
+                        {r.saleBranchId && r.saleBranchId !== r.branchId && <span className="ms-1 text-[11px] text-ink-faint">({r.saleBranchName})</span>}
+                      </td>
+                      <td className="px-3 py-2 text-ink">
+                        {r.branchCode ?? branchName(r.branchId)} · {r.registerName ?? "—"}
+                      </td>
+                      <td className="px-3 py-2 text-ink">{r.cashierName}</td>
+                      <td className="px-3 py-2 text-end">{r.itemCount}</td>
+                      <td className="px-3 py-2 text-ink-soft">{t(`pos.terminal.payment.${r.refundMethod}`)}</td>
+                      <td className="px-3 py-2 text-end font-semibold text-wine">-{formatPrice(r.refundTotal)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -388,6 +433,7 @@ export default function PosSales() {
                     <th className="px-3 py-2 text-start">{t("admin.posSales.closed")}</th>
                     <th className="px-3 py-2 text-end">{t("pos.closeRegister.salesCount")}</th>
                     <th className="px-3 py-2 text-end">{t("pos.branch.gross")}</th>
+                    <th className="px-3 py-2 text-end">{t("pos.returns.refunds")}</th>
                     <th className="px-3 py-2 text-end">{t("pos.openRegister.startingCash")}</th>
                     <th className="px-3 py-2 text-end">{t("pos.closeRegister.expectedCash")}</th>
                     <th className="px-3 py-2 text-end">{t("admin.posSales.counted")}</th>
@@ -425,6 +471,7 @@ export default function PosSales() {
                         <td className="px-3 py-2 text-ink-soft">{s.status === "open" ? <Badge tone="success">{t("admin.posSales.open")}</Badge> : fmtTime(s.closedAt, true)}</td>
                         <td className="px-3 py-2 text-end">{s.salesCount}</td>
                         <td className="px-3 py-2 text-end">{formatPrice(s.grossTotal)}</td>
+                        <td className="px-3 py-2 text-end text-wine">{(s.refundTotal ?? 0) > 0 ? `-${formatPrice(s.refundTotal ?? 0)}` : "—"}</td>
                         <td className="px-3 py-2 text-end">{formatPrice(s.startingCash)}</td>
                         <td className="px-3 py-2 text-end">{formatPrice(expected)}</td>
                         <td className="px-3 py-2 text-end">{s.countedCash !== undefined ? formatPrice(s.countedCash) : "—"}</td>
@@ -471,6 +518,7 @@ export default function PosSales() {
       </Modal>
 
       <ShiftDetailModal session={detail} onClose={() => setDetail(null)} />
+      <PosReturnDetailModal ret={openReturn} onClose={() => setOpenReturn(null)} />
     </div>
   );
 }
